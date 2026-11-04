@@ -82,10 +82,12 @@ Nothing to build. Serve the folder, or just open `index.html`.
 python -m http.server 8000
 ```
 
-Cloud sign-in needs a Supabase project. The database side is three tables and
-their policies (`gsd_profiles`, `gsd_projects`, `gsd_project_shares`); point
-`SB_URL` and `SB_ANON` at the bottom of `index.html` at your own project. The
-anon key is meant to be public — row-level security is what protects the data.
+Cloud sign-in needs a Supabase project (this app uses its own, separate from
+any other app's). The database side is three tables and their policies
+(`gsd_profiles`, `gsd_projects`, `gsd_project_shares`) plus helper functions in
+a non-exposed `private` schema; point `SB_URL` and `SB_ANON` near the bottom of
+`index.html` at your own project. The anon key is meant to be public —
+row-level security is what protects the data.
 
 In **Supabase → Authentication → URL Configuration**, set the **Site URL** to
 wherever the app is served from and add it to **Redirect URLs**, or the sign-in
