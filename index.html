@@ -4860,7 +4860,10 @@ function addPortableDryer3(dr,x,z,col,hRad){
 // Built in a group: −Z is the front bumper, +Z the trailer rear, 62 ft overall at scale 1.
 // opacity < 1 gives the translucent "ghost" used at auger load points.
 const SEMI_LEN_FT=62;
-// A plain row-crop tractor: nose at +Z, so rotation.y = -heading aligns it.
+// A plain row-crop tractor. Nose at -Z and drawbar at +Z, matching buildSemi3,
+// so rotation.y = -heading points the nose along the heading. A tractor's PTO is
+// on its REAR, so the auger's heading backs the tractor onto the hitch: rear to
+// the auger, nose pointing away down the tongue.
 function buildTractor3(lenFt,widFt,colHex){
   const g=new THREE.Group();
   const L=Math.max(8,lenFt), W=Math.max(5,widFt);
@@ -4868,21 +4871,23 @@ function buildTractor3(lenFt,widFt,colHex){
   const dark=new THREE.MeshLambertMaterial({color:0x1f2937});
   const glass=new THREE.MeshLambertMaterial({color:0x93c5fd,transparent:true,opacity:0.55});
   const hood=new THREE.Mesh(new THREE.BoxGeometry(W*0.52,L*0.16,L*0.40),body);
-  hood.position.set(0,L*0.21,L*0.20); hood.castShadow=true; g.add(hood);
+  hood.position.set(0,L*0.21,-L*0.20); hood.castShadow=true; g.add(hood);
   const cab=new THREE.Mesh(new THREE.BoxGeometry(W*0.62,L*0.22,L*0.26),body);
-  cab.position.set(0,L*0.31,-L*0.05); cab.castShadow=true; g.add(cab);
+  cab.position.set(0,L*0.31,L*0.05); cab.castShadow=true; g.add(cab);
   const win=new THREE.Mesh(new THREE.BoxGeometry(W*0.64,L*0.13,L*0.21),glass);
-  win.position.set(0,L*0.35,-L*0.05); g.add(win);
+  win.position.set(0,L*0.35,L*0.05); g.add(win);
   const rear=new THREE.Mesh(new THREE.BoxGeometry(W*0.48,L*0.12,L*0.20),body);
-  rear.position.set(0,L*0.17,-L*0.25); g.add(rear);
+  rear.position.set(0,L*0.17,L*0.25); g.add(rear);
   const wheel=(r,w,px,py,pz)=>{ const m=new THREE.Mesh(new THREE.CylinderGeometry(r,r,w,16),dark);
     m.rotation.z=Math.PI/2; m.position.set(px,py,pz); m.castShadow=true; g.add(m); };
   const rr=L*0.17, fr=L*0.11;
-  [-1,1].forEach(s=>{ wheel(rr,W*0.17,s*(W/2-W*0.10),rr,-L*0.23);
-                      wheel(fr,W*0.13,s*(W/2-W*0.13),fr,L*0.27); });
-  // drawbar the auger hitches to
+  [-1,1].forEach(s=>{ wheel(rr,W*0.17,s*(W/2-W*0.10),rr,L*0.23);     // drive wheels, auger side
+                      wheel(fr,W*0.13,s*(W/2-W*0.13),fr,-L*0.27); });  // steers, away from the auger
+  // drawbar + PTO stub on the rear, which is the end that faces the auger
   const bar=new THREE.Mesh(new THREE.BoxGeometry(0.22,0.22,L*0.18),dark);
-  bar.position.set(0,rr*0.55,-L*0.41); g.add(bar);
+  bar.position.set(0,rr*0.55,L*0.41); g.add(bar);
+  const pto=new THREE.Mesh(new THREE.CylinderGeometry(0.14,0.14,L*0.10,10),dark);
+  pto.rotation.x=Math.PI/2; pto.position.set(0,rr*0.80,L*0.45); g.add(pto);
   return g;
 }
 function buildSemi3(color,opacity=1,scale=1){
@@ -5080,38 +5085,83 @@ function populate3D(){
   }
 
   // ── SATELLITE GROUND TEXTURE ──────────────────────────────
+  // A single low-zoom tile covered the whole county at ~9 ft per pixel, which
+  // smeared the yard into a green blur. Instead, stitch a grid of tiles at the
+  // highest zoom that still covers the site in a sensible number of requests —
+  // roughly 0.7-1.5 ft per pixel, so pads, drives and existing bins read.
   if(scene3._gnd&&!_drag3Mode){
-    (function loadSatTile(){
-      const ZOOM=14,n=Math.pow(2,ZOOM),lr=_rLat*Math.PI/180;
-      const tx=Math.floor((_rLng+180)/360*n);
-      const ty=Math.floor((1-Math.log(Math.tan(lr)+1/Math.cos(lr))/Math.PI)/2*n);
-      const url=`https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${ZOOM}/${ty}/${tx}`;
-      if(scene3._gnd._satUrl===url) return; // already loaded this tile
-      const tLonMin=tx/n*360-180, tLonMax=(tx+1)/n*360-180;
-      const tLatMaxR=Math.atan(Math.sinh(Math.PI*(1-2*ty/n)));
-      const tLatMinR=Math.atan(Math.sinh(Math.PI*(1-2*(ty+1)/n)));
-      const tLatMax=tLatMaxR*180/Math.PI, tLatMin=tLatMinR*180/Math.PI;
-      const nw=toXZ(tLatMax,tLonMin),se=toXZ(tLatMin,tLonMax);
-      const tw=se.x-nw.x,th=se.z-nw.z,cx=(nw.x+se.x)/2,cz=(nw.z+se.z)/2;
-      new THREE.TextureLoader().load(url,tex=>{
-        if(!scene3||!scene3._gnd) return;
-        const g=scene3._gnd;
-        if(g._satUrl===url) return;
-        g._satUrl=url;
-        g.material.color.set(0xffffff);
-        g.material.map=tex;g.material.needsUpdate=true;
-        g.geometry.dispose();g.geometry=new THREE.PlaneGeometry(tw,th);
-        g.position.set(cx,0,cz);
-        // Extend a fallback border around the tile so edges don't show sky color
+    const MAX_GRID=6, MIN_ZOOM=15, MAX_ZOOM=19, APRON_FT=300;
+    const tileXY=(lat,lng,z)=>{ const n=Math.pow(2,z), lr=lat*Math.PI/180;
+      return { x:(lng+180)/360*n, y:(1-Math.log(Math.tan(lr)+1/Math.cos(lr))/Math.PI)/2*n }; };
+
+    // Site extent plus an apron, so there is ground beyond the equipment
+    let laMin=Infinity,laMax=-Infinity,loMin=Infinity,loMax=-Infinity;
+    all.forEach(o=>{ if(!isFinite(o.lat)||!isFinite(o.lng)) return;
+      laMin=Math.min(laMin,o.lat); laMax=Math.max(laMax,o.lat);
+      loMin=Math.min(loMin,o.lng); loMax=Math.max(loMax,o.lng); });
+    if(!isFinite(laMin)){ laMin=laMax=_rLat; loMin=loMax=_rLng; }
+    const dLat=APRON_FT/364000, dLng=APRON_FT/(364000*Math.max(0.2,Math.cos(_rLat*Math.PI/180)));
+    laMin-=dLat; laMax+=dLat; loMin-=dLng; loMax+=dLng;
+
+    const gridAt=z=>{ const a=tileXY(laMax,loMin,z), b=tileXY(laMin,loMax,z);
+      const x0=Math.floor(a.x), y0=Math.floor(a.y);
+      return { z, x0, y0, gw:Math.floor(b.x)-x0+1, gh:Math.floor(b.y)-y0+1 }; };
+
+    // Highest zoom whose grid still fits the request budget
+    let pick=gridAt(MIN_ZOOM);
+    for(let z=MAX_ZOOM;z>=MIN_ZOOM;z--){ const g=gridAt(z);
+      if(g.gw<=MAX_GRID&&g.gh<=MAX_GRID){ pick=g; break; } }
+
+    (function loadSatMosaic(grid){
+      const {z,x0,y0,gw,gh}=grid;
+      const key=`${z}/${x0}/${y0}/${gw}x${gh}`;
+      const g=scene3._gnd;
+      if(g._satUrl===key||g._satPending===key) return;   // already drawn or in flight
+      g._satPending=key;
+
+      const n=Math.pow(2,z);
+      const lonOf=x=>x/n*360-180;
+      const latOf=y=>Math.atan(Math.sinh(Math.PI*(1-2*y/n)))*180/Math.PI;
+      const nw=toXZ(latOf(y0),lonOf(x0)), se=toXZ(latOf(y0+gh),lonOf(x0+gw));
+      const tw=se.x-nw.x, th=se.z-nw.z, cx=(nw.x+se.x)/2, cz=(nw.z+se.z)/2;
+
+      const cnv=document.createElement('canvas');
+      cnv.width=gw*256; cnv.height=gh*256;
+      const ctx=cnv.getContext('2d');
+      ctx.fillStyle='#3d6e2a'; ctx.fillRect(0,0,cnv.width,cnv.height);
+
+      const total=gw*gh; let done=0, ok=0;
+      const finish=()=>{
+        if(++done<total) return;
+        if(!scene3||!scene3._gnd||scene3._gnd._satPending!==key) return;  // scene moved on
+        const gm=scene3._gnd;
+        // Imagery thins out at the top zooms in rural areas — step down and retry
+        if(ok<total/2 && z>MIN_ZOOM){ gm._satPending=null; loadSatMosaic(gridAt(z-1)); return; }
+        gm._satPending=null;
+        if(!ok){ gm.geometry.dispose(); gm.geometry=new THREE.PlaneGeometry(8000,8000); gm.position.set(0,0,0); return; }
+        gm._satUrl=key;
+        const tex=new THREE.CanvasTexture(cnv);
+        tex.anisotropy=(ren3&&ren3.capabilities)?ren3.capabilities.getMaxAnisotropy():1;
+        tex.minFilter=THREE.LinearMipmapLinearFilter; tex.generateMipmaps=true;
+        if(gm.material.map) gm.material.map.dispose();
+        gm.material.color.set(0xffffff);
+        gm.material.map=tex; gm.material.needsUpdate=true;
+        gm.geometry.dispose(); gm.geometry=new THREE.PlaneGeometry(tw,th);
+        gm.position.set(cx,0,cz);
+        // Fallback apron beyond the mosaic so the edges never show sky
         if(!scene3._gndBorder){
-          const bm=new THREE.Mesh(new THREE.PlaneGeometry(12000,12000),new THREE.MeshLambertMaterial({color:0x3d6e2a}));
+          const bm=new THREE.Mesh(new THREE.PlaneGeometry(24000,24000),new THREE.MeshLambertMaterial({color:0x3d6e2a}));
           bm.rotation.x=-Math.PI/2;bm.position.set(0,-0.1,0);bm.receiveShadow=true;scene3.add(bm);scene3._gndBorder=bm;
         }
-      },undefined,()=>{
-        // Tile failed — keep green, make sure it covers the area
-        if(scene3&&scene3._gnd){const g=scene3._gnd;g.geometry.dispose();g.geometry=new THREE.PlaneGeometry(8000,8000);g.position.set(0,0,0);}
-      });
-    })();
+      };
+
+      for(let iy=0;iy<gh;iy++) for(let ix=0;ix<gw;ix++){
+        const im=new Image(); im.crossOrigin='anonymous';
+        im.onload=()=>{ try{ ctx.drawImage(im,ix*256,iy*256,256,256); ok++; }catch(e){} finish(); };
+        im.onerror=finish;
+        im.src=`https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y0+iy}/${x0+ix}`;
+      }
+    })(pick);
   }
 
   // BINS
@@ -5995,8 +6045,11 @@ function populate3D(){
       const tg=buildTractor3(+pa.tractorLenFt||16,+pa.tractorWidFt||8,0x16a34a);
       tg.position.set(tr3.x,0,tr3.z); tg.rotation.y=-ep.tractorHead*Math.PI/180; add3(tg);
       // PTO shaft from the tractor's drawbar to the auger's gearbox
+      // Leave from the PTO stub on the tractor's rear, which faces the auger
+      const tLen=+pa.tractorLenFt||16, hb=ep.backBearing*Math.PI/180;
+      const ptoX=tr3.x-Math.sin(hb)*(tLen*0.45), ptoZ=tr3.z+Math.cos(hb)*(tLen*0.45);
       const shaft=new THREE.Mesh(new THREE.TubeGeometry(new THREE.LineCurve3(
-        new THREE.Vector3(tr3.x,1.1,tr3.z), new THREE.Vector3(hitchEnd.x,1.1,hitchEnd.z)
+        new THREE.Vector3(ptoX,1.1,ptoZ), new THREE.Vector3(hitchEnd.x,1.1,hitchEnd.z)
       ),1,0.12,6,false),new THREE.MeshLambertMaterial({color:0x111827}));
       add3(shaft);
     }
