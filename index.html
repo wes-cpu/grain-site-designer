@@ -4507,10 +4507,15 @@ function addBinShellDetail3(bin,x,z,r,baseY,sideHt,col){
     for(let i=0;i<n;i++){ const a=(i/n)*Math.PI*2; const sx=x+(r+0.28)*Math.sin(a), sz=z-(r+0.28)*Math.cos(a);
       const st=new THREE.Mesh(new THREE.BoxGeometry(0.55,sideHt,0.4),stMat); st.position.set(sx,baseY+sideHt/2,sz); st.rotation.y=-a; st.castShadow=true; add3(st); }
   }
-  // Access door 90° round from the unloader
-  const da=((bin.unloadAng||0)+90)*Math.PI/180; const dx=x+(r+0.12)*Math.sin(da), dz=z-(r+0.12)*Math.cos(da);
-  const frame=new THREE.Mesh(new THREE.BoxGeometry(3.4,5.6,0.25),new THREE.MeshLambertMaterial({color:0x4b5157})); frame.position.set(dx,baseY+2.8,dz); frame.rotation.y=-da; add3(frame);
-  const door=new THREE.Mesh(new THREE.BoxGeometry(2.8,5.0,0.2),new THREE.MeshLambertMaterial({color:galv?0xd7dbdf:col.clone().multiplyScalar(0.9)})); door.position.set(dx+0.1*Math.sin(da),baseY+2.8,dz-0.1*Math.cos(da)); door.rotation.y=-da; add3(door);
+  // Access door on the unloader side — you reach the sump and the unload auger
+  // through this door, so it sits on the same bearing as the unloader.
+  const da=(bin.unloadAng||0)*Math.PI/180; const dx=x+(r+0.12)*Math.sin(da), dz=z-(r+0.12)*Math.cos(da);
+  // On a flat-bottom bin the unload auger runs out at grade on this same bearing,
+  // so lift the threshold clear of the tube instead of letting them intersect.
+  const doorLift=((bin.bottomType||'flat')!=='cone' && bin.showUnload) ? 1.3 : 0;
+  const doorY=baseY+2.8+doorLift;
+  const frame=new THREE.Mesh(new THREE.BoxGeometry(3.4,5.6,0.25),new THREE.MeshLambertMaterial({color:0x4b5157})); frame.position.set(dx,doorY,dz); frame.rotation.y=-da; add3(frame);
+  const door=new THREE.Mesh(new THREE.BoxGeometry(2.8,5.0,0.2),new THREE.MeshLambertMaterial({color:galv?0xd7dbdf:col.clone().multiplyScalar(0.9)})); door.position.set(dx+0.1*Math.sin(da),doorY,dz-0.1*Math.cos(da)); door.rotation.y=-da; add3(door);
   // Colour band at the top ring keeps phase / custom colour readable on a galvanized bin
   if(galv){ const band=new THREE.Mesh(new THREE.CylinderGeometry(r+0.08,r+0.08,1.0,48,1,true),new THREE.MeshLambertMaterial({color:col,side:THREE.DoubleSide})); band.position.set(x,baseY+sideHt-1.2,z); add3(band); }
   // Concrete grade ring
