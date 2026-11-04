@@ -1,0 +1,14 @@
+{
+  "name": "Grain Site Designer",
+  "short_name": "Grain Site",
+  "description": "Design a grain handling site on a satellite map with a 3D view — bins, legs, conveyors, dryers, build phasing, cost estimating and electrical load planning.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#111827",
+  "theme_color": "#111827",
+  "icons": [
+    { "src": "./icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

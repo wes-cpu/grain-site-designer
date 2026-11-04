@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" rx="96" fill="#111827"/>
+  <!-- grain bin: corrugated sidewall, ringed, with a conical roof -->
+  <g transform="translate(256 268)">
+    <!-- roof -->
+    <path d="M-132 -36 L0 -140 L132 -36 Z" fill="#d97706"/>
+    <!-- peak cap -->
+    <rect x="-16" y="-152" width="32" height="18" rx="4" fill="#92400e"/>
+    <!-- sidewall -->
+    <rect x="-132" y="-36" width="264" height="168" fill="#f59e0b"/>
+    <!-- corrugation rings -->
+    <g stroke="#b45309" stroke-width="9" opacity="0.75">
+      <line x1="-132" y1="6"  x2="132" y2="6"/>
+      <line x1="-132" y1="48" x2="132" y2="48"/>
+      <line x1="-132" y1="90" x2="132" y2="90"/>
+    </g>
+    <!-- base slab -->
+    <rect x="-152" y="132" width="304" height="26" rx="6" fill="#9ca3af"/>
+    <!-- unloader sticking out past the wall -->
+    <rect x="132" y="112" width="86" height="20" rx="8" fill="#f97316"/>
+  </g>
+</svg>
