@@ -324,6 +324,11 @@ const PHASE_COLORS = {1:'#f59e0b',2:'#06b6d4',3:'#10b981',4:'#8b5cf6',5:'#ef4444
 const PHASE_NAMES  = {0:'No Phase',1:'Phase 1',2:'Phase 2',3:'Phase 3',4:'Phase 4',5:'Phase 5'};
 const PHASE_PALETTE = ['#f59e0b','#06b6d4','#10b981','#8b5cf6','#ef4444','#f97316','#3b82f6','#84cc16','#ec4899','#14b8a6','#a78bfa','#fb923c','#e11d48','#0891b2','#65a30d'];
 const GRAIN_DENS = { corn:1.2445, soybeans:1.2445, wheat:0.9694, milo:1.1, oats:1.5 };
+// Angle of repose (filling) by commodity: how steeply grain piles above the eave,
+// and therefore how much more a bin holds peaked than level. GSI rate their
+// peaked capacities at 28 degrees.
+const GRAIN_REPOSE = { corn:23, soybeans:27, wheat:25, milo:25, oats:28 };
+function reposeDeg(gt){ const v=GRAIN_REPOSE[gt]; return v==null?23:v; }
 const ROCK_TYPES = [
   { label:'Crushed Limestone',      density:1.50 },
   { label:'Dense Graded Aggregate', density:1.45 },
@@ -626,12 +631,27 @@ function roofHt(bin) {
 function roofDegOf(bin) { return isRoofAuto(bin)?(+bin.roofDeg||DEFAULT_ROOF_DEG):Math.atan2(+bin.roofFt||0,bin.diam/2)*180/Math.PI; }
 function peakHt(bin)  { return eaveHt(bin)+roofHt(bin); }
 function sidewallHt(bin) { return (bin.ringCount*bin.ringIn)/12; }
-function bushels(bin,gt) {
-  const r=bin.diam/2, h=sidewallHt(bin);
+// Cubic feet a bin holds, split into parts that behave differently. The peak is
+// a cone at the commodity's angle of repose, clipped by the roof — grain cannot
+// pile higher than the roof line, so a steep-piling grain in a shallow-roofed
+// bin simply fills the roof instead of peaking further.
+function binVolumes(bin,gt) {
+  const r=bin.diam/2, area=Math.PI*r*r;
+  const level=area*sidewallHt(bin);
   // Hopper-bottom tanks also hold grain in the cone (full cone volume)
-  const coneVol=(bin.bottomType||'flat')==='cone' ? (1/3)*Math.PI*r*r*coneHtCalc(bin) : 0;
-  return (Math.PI*r*r*h + (1/3)*Math.PI*r*r*roofHt(bin)*0.65 + coneVol) / (GRAIN_DENS[gt]||1.2445);
+  const hopper=(bin.bottomType||'flat')==='cone' ? (1/3)*area*coneHtCalc(bin) : 0;
+  const reposeH=r*Math.tan(reposeDeg(gt)*Math.PI/180);
+  const rh=roofHt(bin);
+  const peakH=Math.min(reposeH,rh);
+  return { level, hopper, peak:(1/3)*area*peakH, peakH, reposeH, roofClipped:reposeH>rh+1e-6 };
 }
+function cuFtToBu(v,gt){ return v/(GRAIN_DENS[gt]||1.2445); }
+// Level full — filled to the eave, plus the hopper on a hopper tank.
+function bushelsLevel(bin,gt){ const v=binVolumes(bin,gt); return cuFtToBu(v.level+v.hopper,gt); }
+// Peaked full — level, plus the cone piled above the eave at the angle of repose.
+function bushelsPeaked(bin,gt){ const v=binVolumes(bin,gt); return cuFtToBu(v.level+v.hopper+v.peak,gt); }
+// Headline figure used throughout the app.
+function bushels(bin,gt){ return bushelsPeaked(bin,gt); }
 function legAngle(legHt,binPeak,d) { const dh=legHt-binPeak; return dh<=0?null:Math.atan2(dh,d)*180/Math.PI; }
 function reqLegHt(peak,d,ang=TARGET_ANG) { return peak+d*Math.tan(ang*Math.PI/180); }
 function convAngle(fromHt,toHt,d) { const dh=toHt-fromHt; if(d===0)return 90; return Math.atan2(dh,d)*180/Math.PI; }
@@ -715,9 +735,13 @@ function stairArcPts(bin) {
   const ll=L.latLng(bin.lat,bin.lng);
   const rM=(bin.diam/2+1.5)*FT2M; // slightly outside the bin wall
   const landDeg=bin.stairsLandDeg||0;
-  const wrapDeg=Math.max(90,bin.stairsWrapDeg||450);
+  // A negative wrap winds the stairs the other way round the bin, so keep the
+  // sign for direction and use the magnitude only for how finely to draw it.
+  const wrapDeg=bin.stairsWrapDeg==null?450:+bin.stairsWrapDeg;
+  const mag=Math.abs(wrapDeg);
+  if(mag<1) return [];
   const startDeg=landDeg-wrapDeg;
-  const steps=Math.max(24,Math.round(wrapDeg/6));
+  const steps=Math.max(24,Math.round(mag/6));
   const pts=[];
   for(let i=0;i<=steps;i++){
     const ang=startDeg+i*(wrapDeg/steps);
@@ -773,9 +797,9 @@ function renderBin(bin) {
     stairArc=L.polyline(arcPts,{color:'#94a3b8',weight:2,dashArray:'4,3',opacity:0.85}).addTo(map);
     // Landing marker at eave (top of stairs)
     const landLL=bearingOffset(ll,rM+4*FT2M,bin.stairsLandDeg||0);
-    stairLandMk=L.marker(landLL,{icon:L.divIcon({html:`<div class="walk-lbl">▲ ${bin.stairsWrapDeg||450}° stairs</div>`,className:'',iconAnchor:[36,6]}),interactive:false}).addTo(map);
+    stairLandMk=L.marker(landLL,{icon:L.divIcon({html:`<div class="walk-lbl">▲ ${bin.stairsWrapDeg==null?450:bin.stairsWrapDeg}° stairs</div>`,className:'',iconAnchor:[36,6]}),interactive:false}).addTo(map);
     // Entry marker at ground (start of stairs)
-    const entryBear=((((bin.stairsLandDeg||0)-(bin.stairsWrapDeg||450))%360)+360)%360;
+    const entryBear=((((bin.stairsLandDeg||0)-(bin.stairsWrapDeg==null?450:bin.stairsWrapDeg))%360)+360)%360;
     const entryLL=bearingOffset(ll,rM+4*FT2M,entryBear);
     stairEntryMk=L.circleMarker(entryLL,{radius:4,fillColor:'#94a3b8',fillOpacity:1,color:'#fff',weight:1,interactive:false}).addTo(map);
   }
@@ -2734,7 +2758,9 @@ function _renderPropertiesInner(p) {
 
 // BIN
 function binHTML(bin) {
-  const eh=eaveHt(bin),ph=peakHt(bin),cap=bushels(bin,S.grainType),fp=Math.PI*(bin.diam/2)**2;
+  const gt=S.grainType||'corn';
+  const eh=eaveHt(bin),ph=peakHt(bin),cap=bushelsPeaked(bin,gt),fp=Math.PI*(bin.diam/2)**2;
+  const lvlBu=bushelsLevel(bin,gt), vol=binVolumes(bin,gt);
   const isCone=(bin.bottomType||'flat')==='cone';
   const cH=coneHtCalc(bin), legH=bin.coneLegHt||3;
   const swatches=BIN_COLORS.map(c=>`<div class="cswatch${bin.color===c?' sel':''}" style="background:${c}" data-clr="${c}"></div>`).join('');
@@ -2781,14 +2807,14 @@ function binHTML(bin) {
   <p style="font-size:0.7em;color:#6b7280;margin-bottom:3px">${isCone?'Cone bottom: inverted cone with support legs, central discharge pipe.':'Flat bottom: standard floor on foundation slab.'}</p>
   <div class="ph">Exterior Staircase</div>
   <div class="fr"><label>Show Staircase</label><input type="checkbox" id="pss" ${bin.showStairs?'checked':''}></div>
-  <div class="fr"><label>Landing Bearing (°)</label><input type="number" id="pssl" value="${bin.stairsLandDeg||0}" min="0" max="359" step="5"/></div>
-  <div class="fr"><label>Wrap Amount (°)</label><input type="number" id="pssw" value="${bin.stairsWrapDeg||450}" min="90" max="1440" step="45"/></div>
-  <p style="font-size:0.7em;color:#6b7280;margin-bottom:3px">Landing: where stairs reach the eave (0°=N 90°=E 180°=S 270°=W). Wrap: 360°=one full turn, 450°=1.25 turns. Stairs step at ground level opposite the wrap direction.</p>
+  <div class="fr"><label>Landing Bearing (°)</label><input type="number" id="pssl" value="${bin.stairsLandDeg||0}" min="-359" max="359" step="5"/></div>
+  <div class="fr"><label>Wrap Amount (°)</label><input type="number" id="pssw" value="${bin.stairsWrapDeg==null?450:bin.stairsWrapDeg}" min="-1440" max="1440" step="45"/></div>
+  <p style="font-size:0.7em;color:#6b7280;margin-bottom:3px">Landing: where stairs reach the eave (0°=N 90°=E 180°=S 270°=W). Wrap: 360°=one full turn, 450°=1.25 turns. <b>A negative wrap winds the stairs the other way round the bin</b>, so −450 mirrors 450. Landing bearing may be negative too (−90 is the same as 270).</p>
   ${bin.showStairs?`<div class="cbox">
     <div class="crow"><span class="lbl">Landing Bearing</span><span class="val">${bin.stairsLandDeg||0}°</span></div>
-    <div class="crow"><span class="lbl">Entry Bearing</span><span class="val">${((((bin.stairsLandDeg||0)-(bin.stairsWrapDeg||450))%360)+360)%360}°</span></div>
-    <div class="crow"><span class="lbl">Wrap</span><span class="val">${(bin.stairsWrapDeg||450)/360} turns (${bin.stairsWrapDeg||450}°)</span></div>
-    <div class="crow"><span class="lbl">Approx Stair Length</span><span class="val">${(Math.PI*bin.diam*(bin.stairsWrapDeg||450)/360).toFixed(1)} ft</span></div>
+    <div class="crow"><span class="lbl">Entry Bearing</span><span class="val">${((((bin.stairsLandDeg||0)-(bin.stairsWrapDeg==null?450:bin.stairsWrapDeg))%360)+360)%360}°</span></div>
+    <div class="crow"><span class="lbl">Wrap</span><span class="val">${(Math.abs(bin.stairsWrapDeg==null?450:bin.stairsWrapDeg)/360).toFixed(2)} turns ${(bin.stairsWrapDeg==null?450:bin.stairsWrapDeg)<0?'↺ counter-clockwise':'↻ clockwise'}</span></div>
+    <div class="crow"><span class="lbl">Approx Stair Length</span><span class="val">${(Math.PI*bin.diam*Math.abs(bin.stairsWrapDeg==null?450:bin.stairsWrapDeg)/360).toFixed(1)} ft</span></div>
   </div>`:''}
   <div class="ph">Side Draw Chutes</div>
   <div class="fr"><label>Side Draw #1</label><input type="checkbox" id="pssd" ${bin.showSideDraw?'checked':''}></div>
@@ -2829,8 +2855,13 @@ function binHTML(bin) {
     <div class="crow"><span class="lbl">Roof Peak</span><span class="val">${ph.toFixed(2)} ft</span></div>
     <div class="crow"><span class="lbl">Diameter</span><span class="val">${bin.diam} ft</span></div>
     <div class="crow"><span class="lbl">Footprint</span><span class="val">${Math.round(fp).toLocaleString()} sq ft</span></div>
-    <div class="crow"><span class="lbl">Est. Capacity</span><span class="val">${Math.round(cap).toLocaleString()} bu</span></div>
+    <div class="crow"><span class="lbl">Angle of Repose</span><span class="val">${reposeDeg(gt)}° (${gt})</span></div>
+    <div class="crow"><span class="lbl">Level Full — to eave</span><span class="val">${Math.round(lvlBu).toLocaleString()} bu</span></div>
+    <div class="crow"><span class="lbl">Peaked Full</span><span class="val good">${Math.round(cap).toLocaleString()} bu</span></div>
+    <div class="crow"><span class="lbl">Peak Above Eave</span><span class="val">${vol.peakH.toFixed(2)} ft${vol.roofClipped?' — roof-limited':''}</span></div>
+    <div class="crow"><span class="lbl">Gain From Peaking</span><span class="val">+${Math.round(cap-lvlBu).toLocaleString()} bu (+${lvlBu>0?((cap/lvlBu-1)*100).toFixed(1):'0'}%)</span></div>
   </div>
+  <p style="font-size:0.7em;color:#6b7280;margin-bottom:3px">Peaked capacity uses ${gt}'s ${reposeDeg(gt)}° angle of repose: the grain cone above the eave is ${(bin.diam/2).toFixed(1)}′ radius × tan(${reposeDeg(gt)}°) = ${vol.reposeH.toFixed(2)}′ tall${vol.roofClipped?`, but the ${roofHt(bin).toFixed(1)}′ roof clips it to ${vol.peakH.toFixed(2)}′`:''}. Change the grain type and both figures move.</p>
   <button class="pbtn warn" onclick="deleteBin('${bin.id}')">Delete Bin</button>`;
 }
 function bindBin(bin) {
@@ -2851,7 +2882,7 @@ function bindBin(bin) {
     bin.sideDrawBearing=+document.getElementById('psdb')?.value||0;
     bin.showStairs=document.getElementById('pss')?.checked??false;
     bin.stairsLandDeg=+document.getElementById('pssl')?.value||0;
-    bin.stairsWrapDeg=+document.getElementById('pssw')?.value||450;
+    { const wv=document.getElementById('pssw'); if(wv&&wv.value!=='') bin.stairsWrapDeg=+wv.value; }
     bin.coneLegHt=+document.getElementById('pconeleght')?.value||bin.coneLegHt||3;
     bin.coneAngleDeg=+document.getElementById('pconeang')?.value||bin.coneAngleDeg||45;
     bin.showSideDraw2=document.getElementById('pssd2')?.checked??false;
@@ -5052,7 +5083,7 @@ function populate3D(){
         const wrapRad=(bin.stairsWrapDeg||450)*Math.PI/180;
         const startRad=landRad-wrapRad;
         const totalHt=sideHt;
-        const numSteps=Math.max(12,Math.round((bin.stairsWrapDeg||450)/15));
+        const numSteps=Math.max(12,Math.round(Math.abs(bin.stairsWrapDeg==null?450:bin.stairsWrapDeg)/15));
         const stepMat=new THREE.MeshLambertMaterial({color:0x94a3b8});
         const stringerMat=new THREE.MeshLambertMaterial({color:0x6b7280,transparent:true,opacity:0.6});
         for(let i=0;i<numSteps;i++){
@@ -5111,7 +5142,7 @@ function populate3D(){
         const wrapRad=(bin.stairsWrapDeg||450)*Math.PI/180;
         const startRad=landRad-wrapRad;
         const totalHt=totalSideHt;
-        const numSteps=Math.max(12,Math.round((bin.stairsWrapDeg||450)/15));
+        const numSteps=Math.max(12,Math.round(Math.abs(bin.stairsWrapDeg==null?450:bin.stairsWrapDeg)/15));
         const stepMat=new THREE.MeshLambertMaterial({color:0x94a3b8});
         const stringerMat=new THREE.MeshLambertMaterial({color:0x6b7280,transparent:true,opacity:0.6});
         for(let i=0;i<numSteps;i++){
