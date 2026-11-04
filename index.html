@@ -178,7 +178,7 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #111827; colo
     <button class="btn"        data-tool="dryer"    title="Add Grain Dryer [Y]">🔥 Dryer</button>
     <button class="btn"        data-tool="highflight" title="Add Conveyor [F] — inclined chain conveyor, click start then end">⤴ Conveyor</button>
     <button class="btn"        data-tool="doublerun" title="Add Double-Run Conveyor [R] — twin-tube paddle conveyor, click start then end">⇄ Dbl-Run</button>
-    <button class="btn"        data-tool="triplerun" title="Add Triple-Run Conveyor [Y] — Sukup low-profile 3-run receiving / reclaim conveyor">⤶ Triple-Run</button>
+    <button class="btn"        data-tool="triplerun" title="Add Triple-Run Conveyor [3] — Sukup low-profile 3-run receiving / reclaim conveyor">⤶ Triple-Run</button>
     <button class="btn"        data-tool="auger"    title="Add Inclined Auger [A] — click start then end">⤴ Auger</button>
     <div class="dd">
       <button class="btn dd-btn" onclick="toggleDd(this)" title="More objects">More ▾</button>
@@ -233,6 +233,7 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #111827; colo
       </div>
     </div>
     <div class="sep"></div>
+    <button class="btn" id="btn-help" onclick="showHelp()" title="How to use the designer — every tool, the grain-flow rules, phases, capacity, power, saving and sharing">❓ Help</button>
     <button class="btn" id="btn-labels" onclick="toggleLabels()" title="Toggle labels on/off (2D map + 3D scene)">🏷 Labels</button>
     <button class="btn" id="btn3d" onclick="toggle3D()" title="Toggle 3D View">🏔 3D</button>
   </div>
@@ -515,7 +516,7 @@ document.addEventListener('keydown', e => {
   if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='y'){ e.preventDefault(); redoAction(); return; }
   if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='d'){ e.preventDefault(); duplicateSelected(); return; }
   if(e.ctrlKey||e.metaKey) return;
-  const km = {v:'select',b:'bin',l:'leg',a:'auger',d:'drag',f:'highflight',r:'doublerun',y:'triplerun',e:'bend',w:'walkway',p:'pit',y:'dryer',t:'truck',o:'loadout',s:'structure',g:'generator',m:'measure'};
+  const km = {v:'select',b:'bin',l:'leg',a:'auger',d:'drag',f:'highflight',r:'doublerun','3':'triplerun',e:'bend',w:'walkway',p:'pit',y:'dryer',t:'truck',o:'loadout',s:'structure',g:'generator',m:'measure'};
   if (km[e.key.toLowerCase()]) { setTool(km[e.key.toLowerCase()]); return; }
   if (e.key === 'Escape') {
     if (S.convAddNodeMode) {
@@ -2096,7 +2097,8 @@ function addPortAuger(lat,lng) {
   const pa={id:'pa_'+uid(),lat,lng,name:'Auger '+(S.portaugers.length+1),
     lengthFt:60,angleDeg:35,headingDeg:0,diamIn:8,capBph:0,color:'#f97316',phase:0,
     paMode:'standalone',connBinId:null,hpAuto:true,cost:0,infraItems:[],
-    swingAway:true,swingLenFt:12,swingDeg:90,showTruck:true,truckDeg:null,truckLenFt:62,truckWidFt:8.5};
+    swingAway:true,swingLenFt:12,swingDeg:90,showTruck:true,truckDeg:null,truckLenFt:62,truckWidFt:8.5,
+    wheelTrackFt:8,hitchLenFt:6,showTractor:true,tractorLenFt:16,tractorWidFt:8};
   pa.motorHp=estimatePaHp(pa); // auto-filled from diameter/length/angle
   S.portaugers.push(pa); renderPortAuger(pa); select('portauger',pa.id); autoSave();
 }
@@ -2106,6 +2108,11 @@ function paNorm(pa){
   if(!(pa.swingLenFt>0)) pa.swingLenFt=12;
   if(pa.swingDeg==null||isNaN(+pa.swingDeg)) pa.swingDeg=90;
   if(pa.showTruck===undefined) pa.showTruck=true;
+  if(pa.showTractor===undefined) pa.showTractor=true;
+  if(pa.wheelTrackFt==null) pa.wheelTrackFt=8;
+  if(pa.hitchLenFt==null) pa.hitchLenFt=6;
+  if(pa.tractorLenFt==null) pa.tractorLenFt=16;
+  if(pa.tractorWidFt==null) pa.tractorWidFt=8;
   if(!(pa.truckLenFt>0)||+pa.truckLenFt===70) pa.truckLenFt=62;
   if(!(pa.truckWidFt>0)) pa.truckWidFt=8.5;
   return pa;
@@ -2188,7 +2195,18 @@ function paEndpoints(pa) {
       truckAt=disLL; truckHead=normDeg(pa.headingDeg+rel); truckLL=disLL;
     }
   }
-  return {bootLL,disLL,bootHt,disHt,runFt,bin,mode:effMode,angDeg,short,problem,needFt,aMax,headHt,hopperLL,swingBearing,truckLL,truckHead,truckAt};
+  // The tongue runs back from the boot, opposite the way the auger discharges.
+  // A PTO auger is driven by a tractor backed onto that hitch, so the tractor
+  // parks in line behind it — which is what decides whether it actually fits.
+  const runBearing=normDeg(bearingTo(bootLL,disLL));
+  const backBearing=normDeg(runBearing+180);
+  const hitchLL=bearingOffset(bootLL,(+pa.hitchLenFt||6)*FT2M,backBearing);
+  let tractorLL=null, tractorHead=null;
+  if(pa.powerSrc==='pto' && pa.showTractor!==false){
+    tractorLL=bearingOffset(hitchLL,((+pa.tractorLenFt||16)/2)*FT2M,backBearing);
+    tractorHead=backBearing;   // backed up to the auger, nose pointing away
+  }
+  return {bootLL,disLL,bootHt,disHt,runFt,bin,mode:effMode,angDeg,short,problem,needFt,aMax,headHt,hopperLL,swingBearing,truckLL,truckHead,truckAt,runBearing,backBearing,hitchLL,tractorLL,tractorHead};
 }
 // Drop-to-connect: a free-standing auger whose discharge end lands over a bin starts loading it;
 // one whose boot lands at a bin's unloader starts unloading it. Returns true when it connected.
@@ -2223,7 +2241,7 @@ function rectCorners(ll,lenFt,widFt,headDeg){
 function renderPortAuger(pa) {
   removePortAugerLyr(pa.id);
   const ep=paEndpoints(pa);
-  const {bootLL,disLL,disHt:htFt,mode,bin,hopperLL,truckLL,truckHead}=ep;
+  const {bootLL,disLL,disHt:htFt,mode,bin,hopperLL,truckLL,truckHead,hitchLL,tractorLL,tractorHead}=ep;
   const sel=()=>select('portauger',pa.id);
   const onClick=e=>{ L.DomEvent.stopPropagation(e); S.tool==='delete'?deletePortAuger(pa.id):sel(); };
   const layers=[];
@@ -2266,6 +2284,16 @@ function renderPortAuger(pa) {
     dragWith(hop,ll=>{ pa.swingDeg=Math.round(relDeg(bearingTo(bootLL,ll)-pa.headingDeg)); });
   }
   // Ghost truck where it loads / unloads
+  if(tractorLL){
+    // Hitch tongue, then the tractor sitting in line behind it
+    const tg=L.polyline([bootLL,hitchLL],{color:'#9ca3af',weight:2,opacity:0.9,interactive:false}).addTo(map);
+    layers.push(tg);
+    const tc=L.polygon(rectCorners(tractorLL,pa.tractorLenFt,pa.tractorWidFt,tractorHead),
+      {color:'#22c55e',weight:1,dashArray:'3,3',fillColor:'#15803d',fillOpacity:0.35,interactive:false}).addTo(map);
+    layers.push(tc);
+    const tl=L.marker(tractorLL,{icon:L.divIcon({html:`<div class="conv-lbl" style="border-color:#22c55e;color:#22c55e;font-size:9px">🚜 PTO tractor</div>`,className:'',iconAnchor:[34,6]}),interactive:false}).addTo(map);
+    layers.push(tl);
+  }
   if(truckLL){
     const tr=L.polygon(rectCorners(truckLL,pa.truckLenFt,pa.truckWidFt,truckHead),{color:'#d1d5db',weight:1,dashArray:'3,3',fillColor:'#6b7280',fillOpacity:0.35,interactive:false}).addTo(map);
     layers.push(tr);
@@ -2328,6 +2356,14 @@ function portAugerHTML(pa) {
   </div>
   ${isHpAuto(pa)?`<p style="font-size:0.69em;color:#6b7280;margin-bottom:3px">Estimated from diameter × length × angle, rounded up to a standard motor. Uncheck Auto to enter your own.</p>`:''}
   <div class="fr"><label>Power Source</label><select id="pasrc">${powerSrcOpts(pa.powerSrc,true)}</select></div>
+  <div class="ph">Undercarriage &amp; Hitch</div>
+  <div class="fr"><label>Undercarriage Width (ft)</label><input type="number" id="pawtrk" value="${pa.wheelTrackFt!=null?pa.wheelTrackFt:8}" min="3" max="20" step="0.5"/></div>
+  <div class="fr"><label>Hitch Tongue Length (ft)</label><input type="number" id="pahitch" value="${pa.hitchLenFt!=null?pa.hitchLenFt:6}" min="2" max="25" step="0.5"/></div>
+  <p style="font-size:0.7em;color:#6b7280;margin-bottom:3px">Undercarriage width is the span across the transport wheels — it sets how much room the auger needs where it stands. The tongue runs back from the boot, opposite the discharge.</p>
+  ${pa.powerSrc==='pto'?`<div class="fr"><label>Show Tractor</label><input type="checkbox" id="patrac" ${pa.showTractor!==false?'checked':''}></div>
+  ${pa.showTractor!==false?`<div class="fr"><label>Tractor Length / Width (ft)</label><input type="number" id="patraclen" value="${pa.tractorLenFt!=null?pa.tractorLenFt:16}" min="8" max="32" step="1" style="width:58px"/><input type="number" id="patracwid" value="${pa.tractorWidFt!=null?pa.tractorWidFt:8}" min="5" max="16" step="0.5" style="width:48px;margin-left:3px"/></div>
+  <p style="font-size:0.7em;color:#6b7280;margin-bottom:3px">🚜 PTO-driven: a tractor backs onto the hitch and parks in line behind the auger, so you can see whether it clears the bin, the driveway and anything else. Total length needed behind the boot is <b>${(((+pa.hitchLenFt||6))+((+pa.tractorLenFt||16))).toFixed(1)}′</b>.</p>`:''}`
+  :`<p style="font-size:0.7em;color:#6b7280;margin-bottom:3px">Set Power Source to 🚜 Tractor PTO to place a tractor on the hitch and check it fits.</p>`}
   ${!isOut?`<div class="ph">Swing-Away Hopper</div>
   <div class="fr"><label>Swing-Away Hopper</label><input type="checkbox" id="paswing" ${pa.swingAway?'checked':''}></div>
   ${hasSwing?`<div class="fr"><label>Hopper Tube Length (ft)</label><input type="number" id="paswlen" value="${pa.swingLenFt}" min="6" max="30" step="1"/></div>
@@ -2342,6 +2378,8 @@ function portAugerHTML(pa) {
   <div class="ph">Summary</div>
   <div class="cbox">
     <div class="crow"><span class="lbl">Tube Length</span><span class="val">${pa.lengthFt} ft</span></div>
+    <div class="crow"><span class="lbl">Undercarriage Width</span><span class="val">${(pa.wheelTrackFt!=null?pa.wheelTrackFt:8).toFixed(1)} ft</span></div>
+    ${pa.powerSrc==='pto'?`<div class="crow"><span class="lbl">Room Behind Boot</span><span class="val">${(((+pa.hitchLenFt||6))+((+pa.tractorLenFt||16))).toFixed(1)} ft (hitch + tractor)</span></div>`:''}
     <div class="crow"><span class="lbl">Angle</span><span class="val">${(+ep.angDeg).toFixed(1)}°${isFill?' (auto)':''}</span></div>
     <div class="crow"><span class="lbl">Horizontal Run</span><span class="val">${runFt} ft</span></div>
     <div class="crow"><span class="lbl">${heightLbl}</span><span class="val"${ep.short?' style="color:#ef4444;font-weight:700"':''}>${htFt.toFixed(1)} ft</span></div>
@@ -2374,6 +2412,11 @@ function bindPortAuger(pa) {
     const swl=document.getElementById('paswlen'); if(swl) pa.swingLenFt=Math.max(6,+swl.value||12);
     const swd=document.getElementById('paswdeg'); if(swd) pa.swingDeg=relDeg(+swd.value||0);
     const tr=document.getElementById('patruck'); if(tr) pa.showTruck=tr.checked;
+    { const wt=document.getElementById('pawtrk'); if(wt&&wt.value!=='') pa.wheelTrackFt=Math.max(3,+wt.value); }
+    { const hl=document.getElementById('pahitch'); if(hl&&hl.value!=='') pa.hitchLenFt=Math.max(2,+hl.value); }
+    { const tc=document.getElementById('patrac'); if(tc) pa.showTractor=tc.checked; }
+    { const tl=document.getElementById('patraclen'); if(tl&&tl.value!=='') pa.tractorLenFt=Math.max(8,+tl.value); }
+    { const tw=document.getElementById('patracwid'); if(tw&&tw.value!=='') pa.tractorWidFt=Math.max(5,+tw.value); }
     const trd=document.getElementById('patrdeg');
     if(pa.paMode!==prevMode) pa.truckDeg=null; // mode switch: fall back to that mode's default truck parking
     else if(trd) pa.truckDeg=relDeg(+trd.value||0);
@@ -2381,7 +2424,7 @@ function bindPortAuger(pa) {
     const trw=document.getElementById('patrwid'); if(trw) pa.truckWidFt=Math.max(6,+trw.value||8.5);
     renderPortAuger(pa); renderProperties(); autoSave();
   }
-  ['pan','palen','paang','pahead','padiam','pabph','pahp','pahpauto','pasrc','pamode','pabin','paswing','paswlen','paswdeg','patruck','patrdeg','patrlen','patrwid'].forEach(id=>document.getElementById(id)?.addEventListener('change',upd));
+  ['pan','palen','paang','pahead','padiam','pabph','pahp','pahpauto','pasrc','pamode','pabin','paswing','paswlen','paswdeg','patruck','patrdeg','patrlen','patrwid','pawtrk','pahitch','patrac','patraclen','patracwid'].forEach(id=>document.getElementById(id)?.addEventListener('change',upd));
   bindPhaseRow(pa,upd);
 }
 
@@ -4817,6 +4860,31 @@ function addPortableDryer3(dr,x,z,col,hRad){
 // Built in a group: −Z is the front bumper, +Z the trailer rear, 62 ft overall at scale 1.
 // opacity < 1 gives the translucent "ghost" used at auger load points.
 const SEMI_LEN_FT=62;
+// A plain row-crop tractor: nose at +Z, so rotation.y = -heading aligns it.
+function buildTractor3(lenFt,widFt,colHex){
+  const g=new THREE.Group();
+  const L=Math.max(8,lenFt), W=Math.max(5,widFt);
+  const body=new THREE.MeshLambertMaterial({color:colHex});
+  const dark=new THREE.MeshLambertMaterial({color:0x1f2937});
+  const glass=new THREE.MeshLambertMaterial({color:0x93c5fd,transparent:true,opacity:0.55});
+  const hood=new THREE.Mesh(new THREE.BoxGeometry(W*0.52,L*0.16,L*0.40),body);
+  hood.position.set(0,L*0.21,L*0.20); hood.castShadow=true; g.add(hood);
+  const cab=new THREE.Mesh(new THREE.BoxGeometry(W*0.62,L*0.22,L*0.26),body);
+  cab.position.set(0,L*0.31,-L*0.05); cab.castShadow=true; g.add(cab);
+  const win=new THREE.Mesh(new THREE.BoxGeometry(W*0.64,L*0.13,L*0.21),glass);
+  win.position.set(0,L*0.35,-L*0.05); g.add(win);
+  const rear=new THREE.Mesh(new THREE.BoxGeometry(W*0.48,L*0.12,L*0.20),body);
+  rear.position.set(0,L*0.17,-L*0.25); g.add(rear);
+  const wheel=(r,w,px,py,pz)=>{ const m=new THREE.Mesh(new THREE.CylinderGeometry(r,r,w,16),dark);
+    m.rotation.z=Math.PI/2; m.position.set(px,py,pz); m.castShadow=true; g.add(m); };
+  const rr=L*0.17, fr=L*0.11;
+  [-1,1].forEach(s=>{ wheel(rr,W*0.17,s*(W/2-W*0.10),rr,-L*0.23);
+                      wheel(fr,W*0.13,s*(W/2-W*0.13),fr,L*0.27); });
+  // drawbar the auger hitches to
+  const bar=new THREE.Mesh(new THREE.BoxGeometry(0.22,0.22,L*0.18),dark);
+  bar.position.set(0,rr*0.55,-L*0.41); g.add(bar);
+  return g;
+}
 function buildSemi3(color,opacity=1,scale=1){
   const G=new THREE.Group(); const tr=opacity<1;
   const M=(hex,extra)=>new THREE.MeshLambertMaterial(Object.assign({color:hex,transparent:tr,opacity},extra||{}));
@@ -5001,7 +5069,9 @@ function populate3D(){
     S.meas3Pt1=null;
     const bar=document.getElementById('meas3d-bar');if(bar)bar.style.display='none';
   }
-  const all=[...S.bins,...S.legs,...S.conveyors.map(c=>{ const nds=convNodes(c); return {lat:(nds[0].lat+nds[nds.length-1].lat)/2,lng:(nds[0].lng+nds[nds.length-1].lng)/2}; }),...S.pits,...S.dryers,...S.trucks,...S.loadouts,...S.bends];
+  // Every placed object counts toward the 3D reference point — a yard holding
+  // only augers, a generator or a tank still has to draw.
+  const all=[...S.bins,...S.legs,...S.conveyors.map(c=>{ const nds=convNodes(c); return {lat:(nds[0].lat+nds[nds.length-1].lat)/2,lng:(nds[0].lng+nds[nds.length-1].lng)/2}; }),...S.pits,...S.dryers,...S.trucks,...S.loadouts,...S.bends,...(S.portaugers||[]),...(S.structures||[]),...(S.propanetanks||[]),...(S.generators||[])];
   if(!all.length){ if(_rLat==null){ const c=map.getCenter(); _rLat=c.lat; _rLng=c.lng; } return; }
   _tag3=null;
   if(!_drag3Mode||_rLat==null){
@@ -5902,22 +5972,34 @@ function populate3D(){
     const axQ=new THREE.Quaternion().setFromUnitVectors(yUpW,perp);
     const axP=bootV.clone().lerp(disV,0.45);
     const wR=1.4;
+    const halfTrack=Math.max(tubR+0.6,(+pa.wheelTrackFt||8)/2);   // wheel centres off the tube
     [-1,1].forEach(s=>{
       const wh=new THREE.Mesh(new THREE.CylinderGeometry(wR,wR,0.45,16),wheelMat);
       wh.setRotationFromQuaternion(axQ);
-      wh.position.set(axP.x+perp.x*s*(tubR+1.3),wR,axP.z+perp.z*s*(tubR+1.3)); wh.castShadow=true; add3(wh);
+      wh.position.set(axP.x+perp.x*s*halfTrack,wR,axP.z+perp.z*s*halfTrack); wh.castShadow=true; add3(wh);
       const armH=Math.max(1,axP.y-wR);
       const arm=new THREE.Mesh(new THREE.CylinderGeometry(0.13,0.13,armH,8),wheelMat);
-      arm.position.set(axP.x+perp.x*s*(tubR+0.7),wR+armH/2,axP.z+perp.z*s*(tubR+0.7)); add3(arm);
+      arm.position.set(axP.x+perp.x*s*(halfTrack*0.55),wR+armH/2,axP.z+perp.z*s*(halfTrack*0.55)); add3(arm);
     });
-    const axle=new THREE.Mesh(new THREE.CylinderGeometry(0.15,0.15,(tubR+1.3)*2+0.5,8),wheelMat);
+    const axle=new THREE.Mesh(new THREE.CylinderGeometry(0.15,0.15,halfTrack*2+0.5,8),wheelMat);
     axle.setRotationFromQuaternion(axQ); axle.position.set(axP.x,wR,axP.z); add3(axle);
     // Tractor hitch tongue extending back past the boot, with hitch ball + jack
-    const hitchEnd=new THREE.Vector3(x,0.8,z).sub(hdir.clone().multiplyScalar(6));
+    const hitchEnd=new THREE.Vector3(x,0.8,z).sub(hdir.clone().multiplyScalar(+pa.hitchLenFt||6));
     const tongue=new THREE.Mesh(new THREE.TubeGeometry(new THREE.LineCurve3(new THREE.Vector3(x,bootY,z),hitchEnd),1,0.13,8,false),wheelMat);
     add3(tongue);
     const hitch=new THREE.Mesh(new THREE.SphereGeometry(0.28,8,8),wheelMat); hitch.position.copy(hitchEnd); add3(hitch);
     const jack=new THREE.Mesh(new THREE.CylinderGeometry(0.09,0.09,0.8,6),wheelMat); jack.position.set(hitchEnd.x,0.4,hitchEnd.z); add3(jack);
+    // PTO drive: a tractor backed onto the hitch, so its footprint is on the plan
+    if(ep.tractorLL){
+      const tr3=toXZ(ep.tractorLL.lat,ep.tractorLL.lng);
+      const tg=buildTractor3(+pa.tractorLenFt||16,+pa.tractorWidFt||8,0x16a34a);
+      tg.position.set(tr3.x,0,tr3.z); tg.rotation.y=-ep.tractorHead*Math.PI/180; add3(tg);
+      // PTO shaft from the tractor's drawbar to the auger's gearbox
+      const shaft=new THREE.Mesh(new THREE.TubeGeometry(new THREE.LineCurve3(
+        new THREE.Vector3(tr3.x,1.1,tr3.z), new THREE.Vector3(hitchEnd.x,1.1,hitchEnd.z)
+      ),1,0.12,6,false),new THREE.MeshLambertMaterial({color:0x111827}));
+      add3(shaft);
+    }
     if(S.showLabels){
       const tag=ep.mode==='fill'?`↑ loads ${ep.bin.name}${ep.short?' ⚠ short':''}`:ep.mode==='reclaim'?`↓ unloads ${ep.bin.name}`:`${htFt.toFixed(0)}′ dis`;
       const spr=makeLabel3(`⤴ ${pa.name}\n${tag}`,pa.color);spr.position.set(ex,disY+8,ez);add3(spr);
@@ -7114,6 +7196,198 @@ setTimeout(()=>{
     })();
   }
 },150);
+
+// ── HELP ──────────────────────────────────────────────────────
+// One place that explains how everything in the designer works. Kept in the
+// same modal as the reports so there is only one overlay to reason about.
+window.helpJump = function(id){
+  const el = document.getElementById(id);
+  if (el) el.scrollIntoView({behavior:'smooth', block:'start'});
+};
+function helpHTML() {
+  const S1 = (id,title) => `<div class="ph" id="${id}" style="margin-top:14px;scroll-margin-top:8px">${title}</div>`;
+  const toc = [
+    ['h-start','Quick start'],
+    ['h-site','Finding your site'],
+    ['h-edit','Placing, moving &amp; editing'],
+    ['h-bins','Grain bins'],
+    ['h-legs','Legs &amp; shared pipes'],
+    ['h-conv','Conveyances'],
+    ['h-flow','Grain flow &amp; connections'],
+    ['h-dryer','Dryers'],
+    ['h-pit','Dump pits'],
+    ['h-other','Everything else'],
+    ['h-phase','Build phases &amp; teardown'],
+    ['h-cap','Capacity'],
+    ['h-cost','Costs'],
+    ['h-power','Electrical load'],
+    ['h-check','Checking the design'],
+    ['h-3d','The 3D view'],
+    ['h-save','Saving &amp; sharing'],
+    ['h-keys','Keyboard shortcuts'],
+  ].map(([id,t]) => `<button class="btn" style="padding:2px 8px;font-size:0.74em" onclick="helpJump('${id}')">${t}</button>`).join(' ');
+
+  return `
+  <p style="font-size:0.84em;color:#9ca3af;margin:0 0 8px">Everything the designer does, in the order you would normally use it. Jump to a section:</p>
+  <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px">${toc}</div>
+
+  ${S1('h-start','Quick start — a site in five steps')}
+  <ol class="guide">
+    <li><b>Find the yard.</b> Type an address or paste coordinates in the search box, then zoom in on the satellite image.</li>
+    <li><b>Place storage.</b> Press <kbd>B</kbd> and click the map for a bin. Set its diameter and rings. <i>Add Row of Matching Bins</i> copies it down a line.</li>
+    <li><b>Add receiving.</b> <kbd>P</kbd> for a dump pit, <kbd>L</kbd> for a leg. In the leg's <i>Bin Routing</i>, tick the bins it fills.</li>
+    <li><b>Connect it up.</b> <kbd>R</kbd> for a double-run (or <kbd>F</kbd>, <kbd>3</kbd>, <kbd>D</kbd>, <kbd>A</kbd>), then click the source and the destination. Connected ends follow whatever they are attached to.</li>
+    <li><b>Check and save.</b> <i>✓ Check</i> finds gaps, <i>Reports</i> prints the numbers, <i>3D</i> shows it standing up, <i>💾 Save</i> keeps it. <kbd>Ctrl</kbd>+<kbd>Z</kbd> undoes anything.</li>
+  </ol>
+
+  ${S1('h-site','Finding your site')}
+  <p style="font-size:0.8em;color:#d1d5db">Type a town, an address, or <b>latitude, longitude</b> into the search box and press <i>Go</i>. Scroll to zoom, drag to pan. The imagery is Esri satellite; at very high zoom it stretches the last real image rather than going blank, so you can keep zooming to place things precisely.</p>
+
+  ${S1('h-edit','Placing, moving &amp; editing')}
+  <ul class="guide">
+    <li><b>Place:</b> pick a tool from the toolbar (or its shortcut key), then click the map. The tool stays armed so you can place several; <kbd>Esc</kbd> or <kbd>V</kbd> returns to Select.</li>
+    <li><b>Select &amp; edit:</b> click any object. Its full settings open in the right-hand panel. Headings in that panel fold — click one to open or close it.</li>
+    <li><b>Move:</b> drag it, in 2D or in 3D. Anything connected to it follows.</li>
+    <li><b>Duplicate:</b> the <i>⧉ Duplicate</i> button at the top of the panel copies the selected object with all its settings.</li>
+    <li><b>Delete:</b> select it and press <kbd>Del</kbd>, use the red <i>Delete</i> button in its panel, or arm the <i>✕ Delete</i> tool and click objects.</li>
+    <li><b>Undo / redo:</b> <kbd>Ctrl</kbd>+<kbd>Z</kbd> and <kbd>Ctrl</kbd>+<kbd>Y</kbd>, or the ↶ ↷ buttons.</li>
+  </ul>
+
+  ${S1('h-bins','Grain bins')}
+  <ul class="guide">
+    <li><b>Size:</b> diameter, ring height and ring count give the sidewall. Roof is sized automatically from the diameter at a set angle — untick <i>Auto</i> to type the manufacturer's overall peak height instead, and the roof height is worked out for you.</li>
+    <li><b>Sidewall type:</b> unstiffened (corrugated only) or stiffened, which adds vertical stiffener channels in 3D.</li>
+    <li><b>Bottom:</b> flat, or a hopper at 40° / 45° / 60° with its own clearance under the outlet.</li>
+    <li><b>Unloader:</b> set its bearing, how far it sticks out past the wall, and its size — <b>8″ auger, 10″ auger or a drag conveyor</b>. It rests on top of the concrete and discharges at pad height, so anything receiving from it is placed underneath the outlet. The access door sits on the same bearing, just above the auger.</li>
+    <li><b>Aeration fans:</b> a primary fan plus as many extra fans as you need, each with its own bearing, type and horsepower. New fans are dropped onto a free stretch of wall automatically.</li>
+    <li><b>Side draws, stairs:</b> optional. Stair <i>wrap</i> can be negative to wind the stairs the other way round the bin.</li>
+    <li><b>Row of bins:</b> <i>Add Row of Matching Bins</i> copies this bin's whole spec in a straight line — set the count, the wall-to-wall gap and the direction.</li>
+  </ul>
+
+  ${S1('h-legs','Legs &amp; shared pipes')}
+  <ul class="guide">
+    <li><b>Height</b> and foundation set how far the leg can throw. The panel shows the angle to each bin it feeds and colours it: green is a good gravity slope, amber is marginal, red will not flow.</li>
+    <li><b>Bin routing:</b> feed <i>all bins</i> or tick specific ones.</li>
+    <li><b>Shared pipes:</b> point one leg at another with <i>Shares pipes with</i>. For bins both legs feed, the second leg tees into the first one's pipe (purple link and distributor) instead of running a duplicate. Bins only one leg feeds keep their own pipe.</li>
+    <li><b>Spout:</b> turn one on to throw to a specific bearing and reach.</li>
+  </ul>
+
+  ${S1('h-conv','Conveyances')}
+  <div class="cbox" style="font-size:0.78em">
+    <div class="crow"><span class="lbl">Auger <kbd>A</kbd></span><span class="val" style="color:#d1d5db">Round tube. Capacity set by diameter; HP estimated from size, length and incline.</span></div>
+    <div class="crow"><span class="lbl">Drag <kbd>D</kbd></span><span class="val" style="color:#d1d5db">Flat horizontal chain conveyor.</span></div>
+    <div class="crow"><span class="lbl">Conveyor <kbd>F</kbd></span><span class="val" style="color:#d1d5db">Inclined chain conveyor in a rectangular housing. Pick a box size (GSI Select Hi-Flight, 12″×12″ up to 36″×32″) and capacity follows.</span></div>
+    <div class="crow"><span class="lbl">Double-run <kbd>R</kbd></span><span class="val" style="color:#d1d5db">Two tubes stacked vertically. Sizes 8/10/12/14″ = 4,000/7,500/11,000/15,000 BPH. Limits: 325′ per run, 35° operating angle — exceed either and it flags red.</span></div>
+    <div class="crow"><span class="lbl">Triple-run <kbd>3</kbd></span><span class="val" style="color:#d1d5db">Sukup, three runs in one low housing. 4,000–10,000 BPH, Style S / T / U, 20° / 30° / 45° discharge bend. Style U reclaims under a 17″ floor.</span></div>
+    <div class="crow"><span class="lbl">Portable auger</span><span class="val" style="color:#d1d5db">Swing-away auger on wheels. See below.</span></div>
+  </div>
+  <p style="font-size:0.8em;color:#d1d5db;margin-top:6px"><b>Drawing one:</b> pick the tool, click the source, then click the destination. Clicking an object connects to it; clicking empty map leaves that end loose. Add bends mid-run with <i>Add Node</i>, and type a height on any node to force it.</p>
+  <p style="font-size:0.8em;color:#d1d5db"><b>Motor HP</b> is estimated from the machine's size, length and lift and rounded up to a standard motor. Untick <i>Auto</i> to enter a nameplate figure.</p>
+  <p style="font-size:0.8em;color:#d1d5db"><b>Portable augers:</b> set length, angle and diameter, plus the <i>undercarriage width</i> (the span across the transport wheels) and the hitch tongue length. Drop one onto a bin to make it load or unload that bin; the swing-away hopper can be dragged round on the map. Set <i>Power Source</i> to <b>🚜 Tractor PTO</b> and a tractor is parked in line on the hitch so you can see whether it actually fits — the panel tells you the total room needed behind the boot. PTO machines are left out of the electrical load.</p>
+
+  ${S1('h-flow','Grain flow &amp; connections — the rules')}
+  <p style="font-size:0.8em;color:#d1d5db">Each conveyance has <i>Receives From</i> and <i>Delivers To</i>. Set those and the ends place themselves, then <b>follow automatically</b> whenever anything moves or changes shape — no re-snapping. Attached ends are pinned: move the object, not the end.</p>
+  <ul class="guide">
+    <li><b>Into a bin</b> → the top fill point, with the run sitting 2′ above it and a downspout dropping the grain in.</li>
+    <li><b>Into a dryer</b> → the top of the dryer at its load end.</li>
+    <li><b>Into a leg</b> → the boot, 6′ up. Never the head.</li>
+    <li><b>Out of a bin</b> → its unloader, with the receiving run passing underneath the outlet.</li>
+    <li><b>Out of a dryer</b> → the discharge at the unload end, at grade.</li>
+    <li><b>Out of a pit</b> → the conveyor discharge at the tail end.</li>
+    <li><b>Out of another conveyance</b> → its head, with the next machine's boot stacked beneath it.</li>
+  </ul>
+  <p style="font-size:0.8em;color:#d1d5db">Where a run sits above what it feeds, a <b>drop spout</b> is drawn and dimensioned. Where it sits below, you get a warning instead — grain cannot climb. Override any end with <i>Head / Boot connects at</i> if your site really is different.</p>
+
+  ${S1('h-dryer','Dryers')}
+  <ul class="guide">
+    <li><b>Portable</b> (stacked modules) or <b>Tower</b> (cylindrical). Portables take 1–3 modules, each with its own length, width and height, and can be raised on legs.</li>
+    <li><b>GSI 2322 preset</b> fills in a real machine in one click: 2 modules, 3 fans at 30/15/15 HP, and the auger and meter-roll loads.</li>
+    <li><b>Fans:</b> each fan has its own HP, the module it belongs to, the face it mounts on (back end by default, as on a real portable) and its position. Fans sharing a module stack vertically.</li>
+    <li><b>Load &amp; unload ends:</b> grain always loads into the <b>top</b> at the load end (green ↑ IN) and discharges at grade from the unload end (orange ↓ OUT). Legs and conveyors aim at those points automatically.</li>
+  </ul>
+
+  ${S1('h-pit','Dump pits')}
+  <ul class="guide">
+    <li><b>Direct-burial:</b> the deep poured pit — grate at grade, sloped hopper to a sump, outlet at the tail end. Width, length and depth give you the volume and the concrete.</li>
+    <li><b>Drive-over (Sudenga SDDO style):</b> sits on grade or in a 38″/45″ trench. Two grates — one under each trailer hopper — feed a conveyor in the trench that carries grain to the leg. Set the grate size, the gap between them to match your trailer, the ramp length and the capacity. The panel shows minutes per 1,000 bu.</li>
+  </ul>
+
+  ${S1('h-other','Everything else')}
+  <div class="cbox" style="font-size:0.78em">
+    <div class="crow"><span class="lbl">Overhead load-out</span><span class="val" style="color:#d1d5db">Drive-through bin on legs, open at both ends.</span></div>
+    <div class="crow"><span class="lbl">Structure / building</span><span class="val" style="color:#d1d5db">Open braced frame, closed building, or a truck scale.</span></div>
+    <div class="crow"><span class="lbl">Semi truck</span><span class="val" style="color:#d1d5db">Scale reference for checking turning room and clearances.</span></div>
+    <div class="crow"><span class="lbl">Propane tank</span><span class="val" style="color:#d1d5db">Horizontal tank on saddles, with volume in gallons.</span></div>
+    <div class="crow"><span class="lbl">Generator</span><span class="val" style="color:#d1d5db">kW, voltage and phase — feeds the power estimate.</span></div>
+    <div class="crow"><span class="lbl">Bend / transfer</span><span class="val" style="color:#d1d5db">Marks a head, boot or transfer point at a set height; conveyor nodes can link to it.</span></div>
+    <div class="crow"><span class="lbl">Walkway <kbd>W</kbd></span><span class="val" style="color:#d1d5db">Catwalk between two bins at eave height — click one bin, then the other.</span></div>
+    <div class="crow"><span class="lbl">Measure <kbd>M</kbd></span><span class="val" style="color:#d1d5db">Click points for distance and live area; feeds the rock calculator.</span></div>
+  </div>
+
+  ${S1('h-phase','Build phases &amp; teardown')}
+  <p style="font-size:0.8em;color:#d1d5db">Make as many phases as you need, name them and colour them. Every object has a <b>Build Phase</b> and a <b>Removed in Phase</b>.</p>
+  <p style="font-size:0.8em;color:#d1d5db">For equipment that already exists and later comes out, leave Build Phase as <i>existing</i> and set the phase it is torn down in. In the <i>📋 Summary</i> panel in 3D, clicking a phase shows the yard <b>as it stands in that phase</b> — everything built by then, minus anything already removed. Stepping through the phases plays the whole build in order, which is the walk-through to show a customer.</p>
+
+  ${S1('h-cap','Capacity')}
+  <p style="font-size:0.8em;color:#d1d5db">Each bin reports <b>level full</b> (to the eave, plus the hopper on a hopper tank) and <b>peaked full</b>. The peak is a cone at the grain's own <b>angle of repose</b> — corn 23°, wheat and milo 25°, soybeans 27°, oats 28° — clipped by the roof, since grain cannot pile past the roof line. Change the grain type at the top of the Capacity section and both figures move.</p>
+
+  ${S1('h-cost','Costs')}
+  <p style="font-size:0.8em;color:#d1d5db">Every object takes an equipment cost plus as many infrastructure line items as you want (concrete, electrical, dirt work, freight). Totals roll up per phase in the cost report, so you can see what each stage of the build actually costs. The rock calculator in the summary panel sizes gravel from a measured area.</p>
+
+  ${S1('h-power','Electrical load')}
+  <p style="font-size:0.8em;color:#d1d5db">Enter horsepower on each motor — bin fans and unloads, legs, conveyances, dryer fans. Conveyance HP is estimated for you. Then open <b>⚡ Power</b>:</p>
+  <ul class="guide">
+    <li>Set your incoming service — amps, voltage, single or three phase.</li>
+    <li>Each motor's <b>Power Source</b> is the utility, a generator you have placed, or 🚜 PTO (left out entirely).</li>
+    <li><b>Operating modes</b> let you say what actually runs together — receiving, drying, load-out. The analysis covers one mode at a time, so you size for reality instead of everything at once.</li>
+    <li>kW is HP × 0.7457. <b>Motor starting inrush</b> is modelled at ~6× full load, shown worst case and with staged starting, and generators are checked against ~3× surge. The recommended generator size accounts for starting the largest motor while the rest run.</li>
+  </ul>
+
+  ${S1('h-check','Checking the design')}
+  <ul class="guide">
+    <li><b>✓ Check</b> — bins with no way to fill them, slopes too flat to flow, tight clearances, and throughput in trucks per hour. The badge shows how many issues are open.</li>
+    <li><b>Reports</b> — bins, legs, conveyances, dryers, phases, costs and the site summary, printable and exportable as CSV.</li>
+    <li><b>Images</b> — save the 2D map or the 3D view as a picture, and a scaled plan sheet.</li>
+    <li><b>🏷 Labels</b> toggles the name tags in both views when it gets busy.</li>
+  </ul>
+
+  ${S1('h-3d','The 3D view')}
+  <p style="font-size:0.8em;color:#d1d5db">Press <i>🏔 3D</i>. Left-drag orbits, right-drag pans, scroll zooms. Click an object to select and edit it; drag it to move it. The <i>➕ Add Object</i> bar places new equipment straight into the 3D scene, and <i>📋 Summary</i> opens the visibility and phase panel — toggle whole equipment types or individual objects, and step through the phases.</p>
+
+  ${S1('h-save','Saving &amp; sharing')}
+  <ul class="guide">
+    <li><b>Automatic:</b> your work is always kept in the browser you drew it in.</li>
+    <li><b>Projects:</b> <i>File → Projects</i> saves named layouts on this computer.</li>
+    <li><b>Linked data file:</b> <i>File → Link Data File</i> points the app at a .json file — put it in OneDrive and your work follows you between your own computers. Chrome or Edge.</li>
+    <li><b>Cloud projects:</b> <i>☁ Sign In</i> with your email and open the one-time link — no password. Saved projects then live in the cloud and can be shared.</li>
+    <li><b>Sharing:</b> every project is private until you share it. On one of yours, <i>👥 Share</i> adds someone by email at <b>Can view</b> or <b>Can view &amp; edit</b>. They do not need an account yet — it appears the first time they sign in with that address. Only the owner can delete a project or change who it is shared with. <i>⧉ My copy</i> takes a copy of someone else's layout into your own account.</li>
+    <li><b>Export / import:</b> JSON files for backup or for sending a layout to someone who does not sign in.</li>
+  </ul>
+
+  ${S1('h-keys','Keyboard shortcuts')}
+  <div class="cbox" style="font-size:0.78em">
+    <div class="crow"><span class="lbl">V</span><span class="val" style="color:#d1d5db">Select / move</span></div>
+    <div class="crow"><span class="lbl">B / L / P / Y</span><span class="val" style="color:#d1d5db">Bin / Leg / Pit / Dryer</span></div>
+    <div class="crow"><span class="lbl">Ctrl+D</span><span class="val" style="color:#d1d5db">Duplicate selected</span></div>
+    <div class="crow"><span class="lbl">A / D / F</span><span class="val" style="color:#d1d5db">Auger / Drag / Conveyor</span></div>
+    <div class="crow"><span class="lbl">R / 3</span><span class="val" style="color:#d1d5db">Double-run / Triple-run</span></div>
+    <div class="crow"><span class="lbl">E / W / M</span><span class="val" style="color:#d1d5db">Bend / Walkway / Measure</span></div>
+    <div class="crow"><span class="lbl">T / O / S / G</span><span class="val" style="color:#d1d5db">Truck / Load-out / Structure / Generator</span></div>
+    <div class="crow"><span class="lbl">Ctrl+Z / Ctrl+Y</span><span class="val" style="color:#d1d5db">Undo / redo</span></div>
+    <div class="crow"><span class="lbl">Del</span><span class="val" style="color:#d1d5db">Delete selected</span></div>
+    <div class="crow"><span class="lbl">Esc</span><span class="val" style="color:#d1d5db">Cancel / back to Select</span></div>
+  </div>
+  <p style="font-size:0.72em;color:#6b7280;margin-top:10px">Equipment dimensions and capacities follow published GSI, Sukup and Sudenga literature. Treat the electrical, concrete and structural figures as planning estimates — have them confirmed by your electrician and your dealer before you build.</p>`;
+}
+function showHelp() {
+  document.getElementById('modal-title').textContent = '❓ How to use the Grain Site Designer';
+  const csv = document.getElementById('modal-csv-btn'); if (csv) csv.style.display = 'none';
+  document.getElementById('modal-body').innerHTML = helpHTML();
+  document.getElementById('modal-body').scrollTop = 0;
+  document.getElementById('modal-overlay').classList.add('open');
+}
+window.showHelp = showHelp;
+
 </script>
 <!-- ══ Cloud sign-in + shared projects (Supabase) ═══════════════════════════
      Self-contained: the designer works fully offline without this. Signing in
