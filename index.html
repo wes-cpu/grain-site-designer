@@ -446,6 +446,144 @@ function gatherElecLoads() {
   S.portaugers.forEach(p=>add(p.id+'|motor',p.name+' — Motor'+(isHpAuto(p)?' (est.)':''),paHp(p),p,p.id,true));
   return loads;
 }
+// ── SCENARIO PLANNER ──────────────────────────────────────────
+// Rather than ticking motors by hand, describe the job — "fill Bin 3 from the
+// pit", "dry into Bin 5", "load out of Bin 2" — and let the site's own grain-flow
+// connections say which motors that actually takes. The rules that matter are the
+// ones you would apply yourself: a bin being filled does not run its unloader,
+// the dryer only counts when grain goes through it, and aeration is a separate
+// decision from moving grain.
+const SCEN_ACTS = {
+  fill:     {label:'Filling a bin',            from:['pit','bin','dryer','portauger'], to:['bin'],               verb:'\u2192'},
+  dry:      {label:'Drying',                   from:['bin','pit'],                     to:['bin'],               verb:'\u2192 dryer \u2192', via:'dryer'},
+  loadout:  {label:'Unloading / load-out',     from:['bin'],                           to:['loadout','portauger','bin'], verb:'\u2192'},
+  transfer: {label:'Bin to bin transfer',      from:['bin'],                           to:['bin'],               verb:'\u2192'},
+  aeration: {label:'Aeration / drying fans only', from:[],                             to:[],                    verb:''},
+};
+const nodeKey = (t,id) => t+':'+id;
+function scenObjects(types){
+  const map = {bin:S.bins, pit:S.pits, dryer:S.dryers, leg:S.legs, loadout:S.loadouts, portauger:S.portaugers, conveyor:S.conveyors};
+  const out=[];
+  (types||[]).forEach(t => (map[t]||[]).forEach(o => out.push({type:t, id:o.id, name:o.name})));
+  return out;
+}
+function scenName(t,id){
+  const map = {bin:S.bins, pit:S.pits, dryer:S.dryers, leg:S.legs, loadout:S.loadouts, portauger:S.portaugers, conveyor:S.conveyors};
+  const o=(map[t]||[]).find(x=>x.id===id); return o?o.name:'?';
+}
+// Directed graph of where grain can actually go, straight off the connections
+// already drawn on the site.
+function flowGraph(){
+  const out = new Map();
+  const edge = (a,b) => { if(!out.has(a)) out.set(a,[]); out.get(a).push(b); };
+  (S.conveyors||[]).forEach(c => {
+    (c.feedsFrom||[]).forEach(f => edge(nodeKey(f.type,f.id), nodeKey('conveyor',c.id)));
+    (c.feedsTo||[]).forEach(t => edge(nodeKey('conveyor',c.id), nodeKey(t.type,t.id)));
+  });
+  (S.legs||[]).forEach(l => {
+    const bins = (l.feedsBins==null) ? (S.bins||[]).map(b=>b.id) : (l.feedsBins||[]);
+    bins.forEach(id => edge(nodeKey('leg',l.id), nodeKey('bin',id)));
+    (l.feedsDryers||[]).forEach(id => edge(nodeKey('leg',l.id), nodeKey('dryer',id)));
+    (l.feedsLoadouts||[]).forEach(id => edge(nodeKey('leg',l.id), nodeKey('loadout',id)));
+  });
+  (S.portaugers||[]).forEach(p => {
+    if(!p.connBinId) return;
+    if(p.paMode==='fill')    edge(nodeKey('portauger',p.id), nodeKey('bin',p.connBinId));
+    if(p.paMode==='reclaim') edge(nodeKey('bin',p.connBinId), nodeKey('portauger',p.id));
+  });
+  return out;
+}
+function flowPath(g, from, to){
+  if(from===to) return [from];
+  const prev=new Map([[from,null]]); const q=[from];
+  while(q.length){
+    const cur=q.shift();
+    for(const nx of (g.get(cur)||[])){
+      if(prev.has(nx)) continue;
+      prev.set(nx,cur);
+      if(nx===to){ const path=[]; let p=nx; while(p!=null){ path.unshift(p); p=prev.get(p); } return path; }
+      q.push(nx);
+    }
+  }
+  return null;
+}
+// Which motors a scenario turns on, and why it could not be worked out if it can't.
+function scenarioMotors(rec){
+  const res = {keys:new Set(), path:null, problem:null};
+  const bins = S.bins||[];
+  const addBinAeration = (b) => {
+    if(b.showFan&&(+b.fanHp||0)>0) res.keys.add(b.id+'|fanP');
+    (b.fans||[]).forEach((f,i)=>{ if((+f.hp||0)>0) res.keys.add(`${b.id}|fan${i}`); });
+  };
+  if(rec.act !== 'aeration'){
+    if(!rec.srcId||!rec.dstId){ res.problem='Pick what the grain comes from and where it goes.'; return res; }
+    const g=flowGraph();
+    const from=nodeKey(rec.srcType,rec.srcId), to=nodeKey(rec.dstType,rec.dstId);
+    const via=SCEN_ACTS[rec.act]&&SCEN_ACTS[rec.act].via;
+    let path=null;
+    if(via==='dryer'){
+      if(!rec.viaId){ res.problem='Pick which dryer the grain runs through.'; return res; }
+      const mid=nodeKey('dryer',rec.viaId);
+      const a=flowPath(g,from,mid), b=flowPath(g,mid,to);
+      if(!a){ res.problem=`Nothing connects ${scenName(rec.srcType,rec.srcId)} to ${scenName('dryer',rec.viaId)}.`; return res; }
+      if(!b){ res.problem=`Nothing connects ${scenName('dryer',rec.viaId)} to ${scenName(rec.dstType,rec.dstId)}.`; return res; }
+      path=a.concat(b.slice(1));
+    } else {
+      path=flowPath(g,from,to);
+      if(!path){ res.problem=`No grain path from ${scenName(rec.srcType,rec.srcId)} to ${scenName(rec.dstType,rec.dstId)} \u2014 check the conveyors' Receives From / Delivers To and the leg's bin routing.`; return res; }
+    }
+    res.path=path;
+    path.forEach((k,i) => {
+      const [t,id]=[k.slice(0,k.indexOf(':')), k.slice(k.indexOf(':')+1)];
+      if(t==='conveyor'||t==='portauger'||t==='leg') res.keys.add(id+'|motor');
+      else if(t==='dryer'){
+        const d=S.dryers.find(x=>x.id===id);
+        if(d){ (d.dryerFans||[]).forEach((f,j)=>{ if((+f.hp||0)>0) res.keys.add(`${id}|fan${j}`); });
+               if((+d.motorHp||0)>0) res.keys.add(id+'|other'); }
+      }
+      else if(t==='bin'){
+        // Grain leaving a bin means its unloader runs. Grain arriving does not —
+        // you never run a bin's unloader while you are filling it.
+        const isLast = i===path.length-1;
+        const b=bins.find(x=>x.id===id);
+        if(b && !isLast && b.showUnload && (+b.unloadHp||0)>0) res.keys.add(id+'|unload');
+      }
+    });
+  }
+  // Aeration is its own call, bin by bin
+  const onPath = new Set((res.path||[]).filter(k=>k.startsWith('bin:')).map(k=>k.slice(4)));
+  bins.forEach(b => {
+    const isDst = rec.dstType==='bin' && b.id===rec.dstId;
+    const isSrc = rec.srcType==='bin' && b.id===rec.srcId;
+    if(rec.act==='aeration'){ if(rec.aerRest!==false) addBinAeration(b); return; }
+    if(isDst && rec.aerDst) addBinAeration(b);
+    else if(isSrc && rec.aerSrc) addBinAeration(b);
+    else if(!isDst && !isSrc && !onPath.has(b.id) && rec.aerRest) addBinAeration(b);
+  });
+  return res;
+}
+// Write a scenario's motor list into its mode, so the rest of the analysis —
+// amps, inrush, generator sizing — needs no special case for scenarios.
+function applyScenarioToMode(modeId, rec){
+  const r=scenarioMotors(rec);
+  if(r.problem) return r;
+  if(!S.opAssign) S.opAssign={};
+  gatherElecLoads().forEach(ld => {
+    const cur = S.opAssign[ld.key] || (S.opModes||[]).map(m=>m.id);
+    const want = r.keys.has(ld.key);
+    const has = cur.includes(modeId);
+    if(want && !has) S.opAssign[ld.key]=cur.concat([modeId]);
+    else if(!want && has) S.opAssign[ld.key]=cur.filter(x=>x!==modeId);
+    else S.opAssign[ld.key]=cur;
+  });
+  return r;
+}
+function scenarioTitle(rec){
+  const a=SCEN_ACTS[rec.act]||{};
+  if(rec.act==='aeration') return 'Aeration only';
+  const via = a.via==='dryer' && rec.viaId ? ` via ${scenName('dryer',rec.viaId)}` : '';
+  return `${a.label}: ${scenName(rec.srcType,rec.srcId)}${via} \u2192 ${scenName(rec.dstType,rec.dstId)}`;
+}
 // Does this motor run in the given operating mode? Unassigned motors default to ALL modes.
 function loadRunsInMode(key,modeId){
   if(modeId==='all') return true;
@@ -7405,6 +7543,47 @@ window.updPowerCfg = function(field, val) {
 };
 // ── Operating mode management ──
 window.setPowerMode = function(id){ S.power.activeMode=id; autoSave(); showPowerReport(); };
+window.updScenDraft = function(field,val){
+  const d = S.scenDraft || (S.scenDraft={act:'fill'});
+  if(field==='src'||field==='dst'){
+    const [t,id]=String(val).split('|');
+    if(field==='src'){ d.srcType=id?t:null; d.srcId=id||null; } else { d.dstType=id?t:null; d.dstId=id||null; }
+  } else if(field==='via'){ d.viaId=val||null; }
+  else if(field==='act'){
+    d.act=val;
+    // Drop a pick the new job cannot use, so the form never carries a stale target
+    const a=SCEN_ACTS[val]||{};
+    if(d.srcType&&!(a.from||[]).includes(d.srcType)){ d.srcType=null; d.srcId=null; }
+    if(d.dstType&&!(a.to||[]).includes(d.dstType)){ d.dstType=null; d.dstId=null; }
+  }
+  else d[field]=val;
+  showPowerReport();
+};
+window.saveScenarioAsMode = function(){
+  const d=S.scenDraft||{};
+  const rec={act:d.act,srcType:d.srcType,srcId:d.srcId,dstType:d.dstType,dstId:d.dstId,viaId:d.viaId,
+             aerSrc:!!d.aerSrc,aerDst:!!d.aerDst,aerRest:!!d.aerRest};
+  const suggested=scenarioTitle(rec);
+  const name=prompt('Name this operating mode:',suggested);
+  if(!name) return;
+  if(!S.opModes) S.opModes=[];
+  const id='m'+Date.now();
+  S.opModes.push({id,name:name.trim(),recipe:rec});
+  const r=applyScenarioToMode(id,rec);
+  if(r.problem){ S.opModes=S.opModes.filter(m=>m.id!==id); alert(r.problem); return; }
+  S.power.activeMode=id;
+  autoSave(); showPowerReport();
+  showToast('\u2713 '+name.trim()+' \u2014 '+r.keys.size+' motors');
+};
+// Re-derive a saved scenario's motors after the site changes around it
+window.rebuildScenario = function(modeId){
+  const m=(S.opModes||[]).find(x=>x.id===modeId);
+  if(!m||!m.recipe) return;
+  const r=applyScenarioToMode(modeId,m.recipe);
+  if(r.problem){ alert(r.problem); return; }
+  autoSave(); showPowerReport();
+  showToast('\u2713 '+m.name+' rebuilt \u2014 '+r.keys.size+' motors');
+};
 window.addOpMode = function(){
   const name=prompt('Name for the new operating mode (e.g. "Aeration Only"):','New Mode');
   if(!name) return;
@@ -7494,8 +7673,61 @@ function showPowerReport() {
     <span style="color:#6b7280">= ${(P.utilVolts*P.utilAmps*(+P.utilPhase===3?Math.sqrt(3):1)/1000).toFixed(0)} kVA available</span>
   </div>`;
 
-  // ─ Operating modes: pick which scenario to analyze, manage modes, assign motors ─
-  html+=`<div class="rpt-section">Operating Modes — what runs at the same time</div>
+  // \u2500 Scenario planner: describe a job, let the grain path pick the motors \u2500
+  const draft = S.scenDraft || (S.scenDraft = {act:'fill', aerDst:false, aerSrc:false, aerRest:false});
+  const act = SCEN_ACTS[draft.act] ? draft.act : 'fill';
+  const actDef = SCEN_ACTS[act];
+  const pick = (id,types,cur,ph) => {
+    const list = scenObjects(types);
+    if(!list.length) return `<span style="color:#ef4444;font-size:0.85em">no ${types.join('/')} placed</span>`;
+    return `<select onchange="updScenDraft('${id}',this.value)" style="padding:3px 6px;background:#111827;border:1px solid #374151;color:#f3f4f6;border-radius:4px;max-width:170px">
+      <option value="">${ph}</option>
+      ${list.map(o=>`<option value="${o.type}|${o.id}"${cur===o.id?' selected':''}>${escH(o.name)}</option>`).join('')}
+    </select>`;
+  };
+  const preview = scenarioMotors({act, srcType:draft.srcType, srcId:draft.srcId, dstType:draft.dstType, dstId:draft.dstId,
+                                  viaId:draft.viaId, aerSrc:draft.aerSrc, aerDst:draft.aerDst, aerRest:draft.aerRest});
+  const prevLoads = gatherElecLoads().filter(ld=>preview.keys.has(ld.key));
+  const prevUtil = prevLoads.filter(ld=>!genById(ld.src));
+  const prevA = prevUtil.reduce((s,ld)=>s+hpToAmps(ld.hp,P.utilVolts,P.utilPhase),0);
+  const prevGenKw = prevLoads.filter(ld=>genById(ld.src)).reduce((s,ld)=>s+hpToKw(ld.hp),0);
+  const prevHp = prevLoads.reduce((s,ld)=>s+ld.hp,0);
+
+  html+=`<div class="rpt-section">Scenario Planner \u2014 size the load from the job</div>
+  <p style="font-size:0.75em;color:#6b7280;margin:5px 0 6px">Say what you are doing and the connections you have already drawn decide which motors it takes. A bin being filled never runs its own unloader, the dryer only counts when grain goes through it, and aeration is a separate choice.</p>
+  <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-size:0.85em;margin-bottom:6px">
+    <select onchange="updScenDraft('act',this.value)" style="padding:3px 6px;background:#111827;border:1px solid #4b5563;color:#f3f4f6;border-radius:4px;font-weight:600">
+      ${Object.keys(SCEN_ACTS).map(k=>`<option value="${k}"${k===act?' selected':''}>${SCEN_ACTS[k].label}</option>`).join('')}
+    </select>
+    ${act!=='aeration'?`<span style="color:#6b7280">from</span>${pick('src',actDef.from,draft.srcId,'\u2014 choose \u2014')}` : ''}
+    ${actDef.via==='dryer'?`<span style="color:#6b7280">through</span>
+      <select onchange="updScenDraft('via',this.value)" style="padding:3px 6px;background:#111827;border:1px solid #374151;color:#f3f4f6;border-radius:4px;max-width:150px">
+        <option value="">\u2014 dryer \u2014</option>
+        ${(S.dryers||[]).map(d=>`<option value="${d.id}"${draft.viaId===d.id?' selected':''}>${escH(d.name)}</option>`).join('')}
+      </select>`:''}
+    ${act!=='aeration'?`<span style="color:#6b7280">to</span>${pick('dst',actDef.to,draft.dstId,'\u2014 choose \u2014')}` : ''}
+  </div>
+  <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;font-size:0.78em;color:#9ca3af;margin-bottom:7px">
+    ${act!=='aeration'?`<label><input type="checkbox" ${draft.aerSrc?'checked':''} onchange="updScenDraft('aerSrc',this.checked)"/> Run fans on the bin being emptied</label>
+    <label><input type="checkbox" ${draft.aerDst?'checked':''} onchange="updScenDraft('aerDst',this.checked)"/> Run fans on the bin being filled</label>`:''}
+    <label><input type="checkbox" ${draft.aerRest?'checked':''} onchange="updScenDraft('aerRest',this.checked)"/> Run fans on ${act==='aeration'?'every bin':'the rest of the site'}</label>
+  </div>`;
+
+  if(preview.problem){
+    html+=`<div style="padding:7px 10px;border:1px solid #7f1d1d;background:rgba(127,29,29,0.18);border-radius:5px;color:#fca5a5;font-size:0.8em;margin-bottom:10px">${escH(preview.problem)}</div>`;
+  } else {
+    const over = prevA > P.utilAmps;
+    html+=`<div style="padding:7px 10px;border:1px solid ${over?'#b45309':'#065f46'};background:${over?'rgba(180,83,9,0.15)':'rgba(6,95,70,0.15)'};border-radius:5px;font-size:0.8em;margin-bottom:8px">
+      ${preview.path?`<div style="color:#9ca3af;margin-bottom:4px">Grain path: <b style="color:#e5e7eb">${preview.path.map(k=>escH(scenName(k.slice(0,k.indexOf(':')),k.slice(k.indexOf(':')+1)))).join(' \u2192 ')}</b></div>`:''}
+      <div style="color:${over?'#fbbf24':'#6ee7b7'}"><b>${prevLoads.length} motor${prevLoads.length===1?'':'s'} \u00b7 ${prevHp.toFixed(1)} HP</b>
+        \u00b7 ${prevA.toFixed(0)} A on the utility of ${P.utilAmps} A${prevGenKw>0?` \u00b7 ${prevGenKw.toFixed(1)} kW on generators`:''}${over?' \u2014 over the service':''}</div>
+      ${prevLoads.length?`<div style="color:#6b7280;margin-top:3px;font-size:0.95em">${prevLoads.map(l=>escH(l.name)).join(' \u00b7 ')}</div>`:'<div style="color:#6b7280;margin-top:3px">No motors \u2014 nothing on this path has horsepower set.</div>'}
+    </div>
+    <button onclick="saveScenarioAsMode()" style="padding:3px 12px;border-radius:4px;border:1px solid #10b981;background:rgba(16,185,129,0.15);color:#6ee7b7;cursor:pointer;font-size:0.82em;font-weight:600;margin-bottom:10px">\uFF0B Save as operating mode</button>`;
+  }
+
+  // \u2500 Operating modes: pick which scenario to analyze, manage modes, assign motors \u2500
+  html+=`<div class="rpt-section">Operating Modes \u2014 what runs at the same time</div>
   <div style="display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin:6px 0 4px">
     <button onclick="setPowerMode('all')" style="padding:2px 10px;border-radius:4px;border:1px solid ${mode==='all'?'#f59e0b':'#4b5563'};background:${mode==='all'?'rgba(245,158,11,0.18)':'rgba(55,65,81,0.4)'};color:${mode==='all'?'#f59e0b':'#9ca3af'};cursor:pointer;font-size:0.8em;font-weight:${mode==='all'?700:400}">All Motors (worst case)</button>
     ${modes.map(m=>`<button onclick="setPowerMode('${m.id}')" style="padding:2px 10px;border-radius:4px;border:1px solid ${mode===m.id?'#10b981':'#4b5563'};background:${mode===m.id?'rgba(16,185,129,0.18)':'rgba(55,65,81,0.4)'};color:${mode===m.id?'#10b981':'#9ca3af'};cursor:pointer;font-size:0.8em;font-weight:${mode===m.id?700:400}">${escH(m.name)}</button>`).join('')}
@@ -7509,7 +7741,7 @@ function showPowerReport() {
     const ovCount=allLoads.filter(ld=>hasSrcOverride(ld.key)).length;
     html+=`<details style="margin-bottom:10px" open><summary style="cursor:pointer;font-size:0.8em;color:#9ca3af">Motors — power source${modes.length?' &amp; operating modes':''} (${allLoads.length} motor${allLoads.length===1?'':'s'}${ovCount?`, ${ovCount} reassigned`:''})</summary>
     <p style="font-size:0.72em;color:#6b7280;margin:5px 0 4px">Each motor follows its equipment's Power Source until you change it here. Set one back to <b>Default</b> to hand it back, or change the equipment's own setting to reset every motor on it.${ovCount?` <button onclick="clearAllSrcOverrides()" style="background:none;border:1px solid #4b5563;color:#9ca3af;border-radius:3px;padding:1px 6px;cursor:pointer;font-size:0.95em;margin-left:4px">Reset all ${ovCount}</button>`:''}</p>
-    <table class="rpt-table" style="margin-top:3px"><thead><tr><th>Motor</th><th>HP</th><th>Powered From</th>${modes.map(m=>`<th style="text-align:center"><input value="${escH(m.name)}" onchange="renameOpMode('${m.id}',this.value)" style="width:82px;background:#111827;border:1px solid #374151;color:#e5e7eb;border-radius:3px;font-size:0.85em;padding:1px 4px;text-align:center"/><br><button onclick="delOpMode('${m.id}')" title="Delete mode" style="background:none;border:none;color:#6b7280;cursor:pointer;font-size:0.8em">✕</button></th>`).join('')}</tr></thead><tbody>`;
+    <table class="rpt-table" style="margin-top:3px"><thead><tr><th>Motor</th><th>HP</th><th>Powered From</th>${modes.map(m=>`<th style="text-align:center"><input value="${escH(m.name)}" onchange="renameOpMode('${m.id}',this.value)" style="width:82px;background:#111827;border:1px solid #374151;color:#e5e7eb;border-radius:3px;font-size:0.85em;padding:1px 4px;text-align:center"/><br>${m.recipe?`<button onclick="rebuildScenario('${m.id}')" title="Re-derive this scenario's motors from the current site" style="background:none;border:none;color:#10b981;cursor:pointer;font-size:0.8em">↻</button>`:''}<button onclick="delOpMode('${m.id}')" title="Delete mode" style="background:none;border:none;color:#6b7280;cursor:pointer;font-size:0.8em">✕</button></th>`).join('')}</tr></thead><tbody>`;
     allLoads.forEach(ld=>{
       const ov=hasSrcOverride(ld.key);
       html+=`<tr><td>${escH(ld.name)}</td><td class="num">${ld.hp}</td>`
@@ -7888,6 +8120,7 @@ function helpHTML() {
     <li>Each piece of equipment has a <b>Power Source</b> — the utility, a generator you have placed, or 🚜 PTO (left out entirely).</li>
     <li><b>Reassign individual motors</b> in the <i>Motors</i> table at the top of the Power Estimate: every motor on the site is listed with its own <i>Powered From</i> picker, so a bin's fan can sit on a generator while its unload stays on the utility. A reassigned motor shows in amber; set it back to <b>Default</b> to hand it to its equipment again, and changing the equipment's own Power Source resets every motor on it.</li>
     <li><b>Operating modes</b> let you say what actually runs together — receiving, drying, load-out. The analysis covers one mode at a time, so you size for reality instead of everything at once.</li>
+    <li><b>Scenario Planner</b> builds those modes for you. Say what you are doing — <i>filling a bin from the pit</i>, <i>drying Bin 1 into Bin 3</i>, <i>loading out of Bin 2</i> — and the connections you have already drawn decide which motors it takes. It traces the grain path and applies the rules you would apply yourself: a bin being filled never runs its own unloader, a bin being emptied does, the dryer only counts when grain actually goes through it, and aeration fans stay off unless you ask for them (separately for the bin being filled, the bin being emptied, and the rest of the site). It shows the path, the motors, the amps and whether it exceeds your service before you save it. <b>Save as operating mode</b> turns it into a mode you can switch between, and the <b>↻</b> on a scenario mode re-derives it after you change the site — worth doing whenever you add equipment, since new motors otherwise count in every mode until unchecked.</li>
     <li>kW is HP × 0.7457. <b>Motor starting inrush</b> is modelled at ~6× full load, shown worst case and with staged starting, and generators are checked against ~3× surge. The recommended generator size accounts for starting the largest motor while the rest run.</li>
   </ul>
 
