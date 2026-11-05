@@ -984,10 +984,16 @@ function drawConvLines(cv) {
     const lbl=L.marker(mid,{icon:L.divIcon({html:`<div style="background:rgba(17,24,39,0.88);border:1px solid ${clr};color:${clr};font-size:9px;padding:1px 5px;border-radius:3px;white-space:nowrap">${tipTxt}</div>`,className:'',iconAnchor:[22,6]}),interactive:false}).addTo(map);
     LY.convLines.push(pl,lbl);
   };
-  // Blue lines: sources → boot
+  // Blue lines: the first source feeds the boot; the rest drop in along the run
+  const drops2=convInlineDrops(cv);
+  const dropFor=(id)=>drops2.find(d=>d.srcId===id);
   (cv.feedsFrom||[]).forEach(src=>{
     const ll=getObjLL(src.id,src.type,'head'); if(!ll) return;
-    addLine(ll,bootLL,'#3b82f6','→ boot');
+    const d=dropFor(src.id);
+    if(!d){ addLine(ll,bootLL,'#3b82f6','→ boot'); return; }
+    const bad=d.tooFar||d.cantFlow;
+    addLine(ll,L.latLng(d.lat,d.lng),bad?'#ef4444':'#3b82f6',
+      bad?(d.cantFlow?'✕ no drop — run too high':`✕ ${d.offFt.toFixed(0)}′ off run`):`↓ ${d.dropFt.toFixed(1)}′ drop`);
   });
   // Green lines: head → destinations
   (cv.feedsTo||[]).forEach(dst=>{
@@ -1546,6 +1552,83 @@ function convSpouts(cv) {
   }
   return out;
 }
+// Where a point falls on a conveyor's run: the nearest point along the polyline,
+// the run's height there, and how far off the run the point actually sits.
+// Planar maths with longitude scaled by cos(lat), which is exact enough over a yard.
+function projectOnRun(nodes, ll) {
+  const k = Math.cos((+ll.lat) * Math.PI / 180) || 1;
+  const px = (+ll.lng) * k, py = (+ll.lat);
+  let best = null;
+  for (let i = 0; i < nodes.length - 1; i++) {
+    const a = nodes[i], b = nodes[i+1];
+    const ax = a.lng*k, ay = a.lat, bx = b.lng*k, by = b.lat;
+    const dx = bx-ax, dy = by-ay, len2 = dx*dx + dy*dy;
+    let t = len2 > 0 ? ((px-ax)*dx + (py-ay)*dy) / len2 : 0;
+    t = Math.max(0, Math.min(1, t));
+    const qx = ax + dx*t, qy = ay + dy*t;
+    const d2 = (px-qx)*(px-qx) + (py-qy)*(py-qy);
+    if (!best || d2 < best.d2) best = { d2, segIdx:i, t,
+      lat:qy, lng:qx/k, htFt:(+a.htFt||0) + ((+b.htFt||0)-(+a.htFt||0))*t };
+  }
+  if (!best) return null;
+  best.offFt = distFt(L.latLng(ll.lat, ll.lng), L.latLng(best.lat, best.lng));
+  // Clamped to an end of the whole run means the point is past the conveyor, not beside it
+  best.atStart = best.segIdx === 0 && best.t <= 0.0001;
+  best.atEnd   = best.segIdx === nodes.length-2 && best.t >= 0.9999;
+  return best;
+}
+// How far off the run an outlet may sit and still be called connected
+const INLINE_REACH_FT = 25;
+// One conveyor can collect from a whole row of bins: the first source checked
+// anchors the boot, and every other source drops into the run where it passes
+// underneath. Returns a drop per extra source, flagged when it cannot work.
+function convInlineDrops(cv) {
+  const srcs = cv.feedsFrom || [];
+  if (srcs.length < 2) return [];
+  const nodes = convNodes(cv);
+  const out = [];
+  srcs.slice(1).forEach(src => {
+    let pt = null;
+    if (src.type === 'conveyor') {
+      const sc = S.conveyors.find(x=>x.id===src.id);
+      if (sc) { const sn = convNodes(sc), h = sn[sn.length-1];
+        pt = { lat:h.lat, lng:h.lng, htFt:h.htFt, dischargeHt:h.htFt }; }
+    } else {
+      pt = getSnapPoint(src.id, src.type, cv.srcSnapMode || 'unload');
+    }
+    if (!pt) return;
+    const pr = projectOnRun(nodes, pt);
+    if (!pr) return;
+    const dischargeHt = (pt.dischargeHt != null) ? pt.dischargeHt : pt.htFt;
+    const dropFt = dischargeHt - pr.htFt;
+    out.push({
+      srcId:src.id, srcType:src.type,
+      lat:pr.lat, lng:pr.lng, runHt:pr.htFt,
+      outLat:pt.lat, outLng:pt.lng, dischargeHt, dropFt,
+      topR: pt.outletR || null,
+      offFt: pr.offFt,
+      pastEnd: pr.atStart || pr.atEnd,
+      tooFar: pr.offFt > INLINE_REACH_FT,
+      cantFlow: dropFt < SPOUT_MIN_FT
+    });
+  });
+  return out;
+}
+function inlineDropProblems(cv) {
+  const nm = (d) => {
+    const arr = ({bin:S.bins,pit:S.pits,dryer:S.dryers,conveyor:S.conveyors})[d.srcType]||[];
+    const o = arr.find(a=>a.id===d.srcId); return o ? o.name : d.srcType;
+  };
+  return convInlineDrops(cv).map(d => {
+    if (d.pastEnd && d.tooFar)
+      return `${nm(d)} sits ${d.offFt.toFixed(0)}′ past the end of the run — extend the conveyor to reach under it, or check it first in Receives From so it anchors the boot.`;
+    if (d.tooFar)
+      return `${nm(d)} is ${d.offFt.toFixed(0)}′ off the run — the conveyor doesn't pass under its outlet. Move the run or add a node.`;
+    if (d.cantFlow)
+      return `${nm(d)} discharges at ${d.dischargeHt.toFixed(1)}′ but the conveyor is at ${d.runHt.toFixed(1)}′ there — grain can't drop in. Raise that bin's pad or lower the run.`;
+    return null;
+  }).filter(Boolean);
+}
 function snapConvCore(cv) {
   if(!cv.nodes) cv.nodes = convNodes(cv);
   const nodes = cv.nodes;
@@ -1560,7 +1643,62 @@ function snapConvCore(cv) {
   const { boot, head } = convEndTargets(cv);
   if (boot) apply(nodes[0], boot);
   if (head) apply(nodes[nodes.length-1], head);
+  if (levelRunUnderSources(cv)) changed = true;
   return changed;
+}
+// A conveyor collecting from a row of bins has to stay level under their outlets
+// and only climb after the last one — run it straight from the boot to a raised
+// head and it passes over the far bins instead of under them. So when extra
+// sources are attached, keep one auto node just past the furthest drop at boot
+// height. Only ever touches its own node, so hand-placed nodes are left alone.
+function levelRunUnderSources(cv) {
+  const srcs = cv.feedsFrom || [];
+  const nodes = cv.nodes || convNodes(cv);
+  const autoAt = nodes.findIndex(nd => nd._autoLevel);
+  const drop = () => { if (autoAt >= 0) { nodes.splice(autoAt, 1); return true; } return false; };
+  if (srcs.length < 2) return drop();
+  // Never fight the user's own geometry
+  if (nodes.some(nd => !nd._autoLevel && nd.bendId)) return drop();
+  if (nodes.length > (autoAt >= 0 ? 3 : 2)) return drop();
+
+  const bootNd = nodes[0], headNd = nodes[nodes.length-1];
+  const bootHt = +bootNd.htFt || 0;
+  if ((+headNd.htFt || 0) <= bootHt + SPOUT_MIN_FT) return drop();  // already level enough
+
+  // Furthest source outlet along the boot→head line
+  const line = [{lat:bootNd.lat,lng:bootNd.lng,htFt:bootHt},{lat:headNd.lat,lng:headNd.lng,htFt:bootHt}];
+  let far = null;
+  srcs.slice(1).forEach(s => {
+    const pt = (s.type === 'conveyor')
+      ? (() => { const sc=S.conveyors.find(x=>x.id===s.id); if(!sc) return null;
+                 const sn=convNodes(sc); return sn[sn.length-1]; })()
+      : getSnapPoint(s.id, s.type, cv.srcSnapMode || 'unload');
+    if (!pt) return;
+    const pr = projectOnRun(line, pt);
+    if (!pr || pr.offFt > INLINE_REACH_FT) return;
+    const along = pr.segIdx + pr.t;
+    if (!far || along > far.along) far = { along, lat:pt.lat, lng:pt.lng };
+  });
+  if (!far || far.along >= 0.995) return drop();   // nothing to level under, or it reaches the head
+
+  // Aim the level leg down the row of outlets rather than at the leg, so the run
+  // actually passes under every bin and only doglegs towards the head afterwards.
+  const bootLL = L.latLng(bootNd.lat, bootNd.lng);
+  const rowFt = distFt(bootLL, L.latLng(far.lat, far.lng));
+  const headFt = distFt(bootLL, L.latLng(headNd.lat, headNd.lng));
+  if (rowFt < 1 || rowFt + 4 >= headFt) return drop();   // no room to climb afterwards
+  const ext = (rowFt + 4) / rowFt;                        // clear the last outlet by 4′
+  const lat = bootNd.lat + (far.lat - bootNd.lat) * ext;
+  const lng = bootNd.lng + (far.lng - bootNd.lng) * ext;
+  if (autoAt >= 0) {
+    const nd = nodes[autoAt];
+    // If the user typed a height into it, that wins — only the position keeps following
+    const ht = nd.htManual ? (+nd.htFt||0) : bootHt;
+    if (Math.abs(nd.lat-lat) < 1e-9 && Math.abs(nd.lng-lng) < 1e-9 && Math.abs((nd.htFt||0)-ht) < 1e-6) return false;
+    nd.lat = lat; nd.lng = lng; nd.htFt = ht; return true;
+  }
+  nodes.splice(nodes.length-1, 0, { lat, lng, htFt:bootHt, bendId:null, _autoLevel:true });
+  return true;
 }
 // Auto-follow: every conveyor with grain-flow connections re-snaps whenever anything
 // on the site moves or changes shape. Iterates so chained conveyors propagate.
@@ -3318,11 +3456,21 @@ function convFlowHTML(cv) {
   const ftSummary=ft.length?ft.map(x=>nameLookup(x.id,x.type)).join(', '):'—';
 
   return `<div class="ph">Grain Flow — Receives From <span style="font-size:0.85em;text-transform:none;color:#3b82f6;font-weight:400">(blue → boot)</span></div>
-  <p style="font-size:0.7em;color:#6b7280;margin-bottom:4px">What sends grain INTO the boot (start) of this conveyor. Check all sources.</p>
+  <p style="font-size:0.7em;color:#6b7280;margin-bottom:4px">What sends grain INTO this conveyor. Check as many as you like — the <b>first one checked anchors the boot</b>, and every other one drops into the run where it passes underneath, so a single conveyor can collect a whole row of bins on its way to a leg.</p>
   <div style="border:1px solid #374151;border-radius:4px;max-height:155px;overflow-y:auto;margin-bottom:3px">
     ${fromItems.length?fromItems.join(''):'<p style="color:#6b7280;font-size:0.78em;padding:6px;margin:0">No objects placed yet.</p>'}
   </div>
-  ${ff.length?`<p style="font-size:0.71em;color:#3b82f6;margin:2px 0 6px">← From: ${ffSummary}</p>`:''}
+  ${ff.length?`<p style="font-size:0.71em;color:#3b82f6;margin:2px 0 4px">← From: ${ffSummary}</p>`:''}
+  ${(()=>{ const ds=convInlineDrops(cv); if(!ds.length) return '';
+    return `<div class="cbox" style="font-size:0.74em;margin-bottom:6px">
+      <div class="crow"><span class="lbl" style="color:#9ca3af">Boot anchored to</span><span class="val">${nameLookup(ff[0].id,ff[0].type)}</span></div>
+      ${ds.map(d=>{
+        const who=nameLookup(d.srcId,d.srcType);
+        if(d.tooFar) return `<div class="crow"><span class="lbl">${who}</span><span class="val bad">${d.offFt.toFixed(0)}′ off the run${d.pastEnd?' (past the end)':''}</span></div>`;
+        if(d.cantFlow) return `<div class="crow"><span class="lbl">${who}</span><span class="val bad">outlet ${d.dischargeHt.toFixed(1)}′ vs run ${d.runHt.toFixed(1)}′ — can't drop in</span></div>`;
+        return `<div class="crow"><span class="lbl">${who}</span><span class="val good">↓ ${d.dropFt.toFixed(1)}′ drop, ${d.offFt.toFixed(0)}′ along</span></div>`;
+      }).join('')}
+    </div>`; })()}
   <div class="ph">Grain Flow — Delivers To <span style="font-size:0.85em;text-transform:none;color:#10b981;font-weight:400">(green → head)</span></div>
   <p style="font-size:0.7em;color:#6b7280;margin-bottom:4px">Where grain exits from the head (end) of this conveyor. Check all destinations.</p>
   <div style="border:1px solid #374151;border-radius:4px;max-height:155px;overflow-y:auto;margin-bottom:3px">
@@ -4331,6 +4479,7 @@ function runSiteCheck(){
     if(c.type==='doublerun'&&bad!==null) add('error',`${nm(c)} runs at ${bad.toFixed(1)}° — double-runs operate at ${DBLRUN_RANGE_LBL}.`,'conveyor',c.id);
     if(c.type==='doublerun'&&tot>DBLRUN_MAX_LEN) add('error',`${nm(c)} is ${tot.toFixed(0)}′ long — over the ${DBLRUN_MAX_LEN}′ double-run limit; split it.`,'conveyor',c.id);
     convSpouts(c).problems.forEach(t=>add('error',`${nm(c)}: ${t}`,'conveyor',c.id));
+    inlineDropProblems(c).forEach(t=>add('error',`${nm(c)}: ${t}`,'conveyor',c.id));
   });
   S.portaugers.forEach(p=>{ const ep=paEndpoints(p); if(ep.problem==='short') add('error',`${nm(p)} is too short to reach ${nm(ep.bin)}'s peak — needs about ${ep.needFt}′.`,'portauger',p.id); if(ep.problem==='steep') add('error',`${nm(p)} would cut through ${nm(ep.bin)}'s roof — needs about ${ep.needFt}′ to lay flat enough.`,'portauger',p.id); });
   S.legs.forEach(l=>{ S.bins.filter(b=>legFeedsBin(l,b.id)).forEach(b=>{ const d=distFt(L.latLng(l.lat,l.lng),L.latLng(b.lat,b.lng)); const ang=legAngle(legEffHt(l),peakHt(b),d); if(ang===null) add('error',`${nm(l)} is lower than ${nm(b)}'s peak — gravity pipe can't fall into it.`,'leg',l.id); else if(ang<TARGET_ANG-2) add('warn',`${nm(l)} → ${nm(b)} pipe falls at ${ang.toFixed(1)}°, under the ${TARGET_ANG}° target — raise the leg or move the bin closer.`,'leg',l.id); }); });
@@ -5512,21 +5661,25 @@ function populate3D(){
     // Drop spouts: a vertical downspout bridges a manual-height end to its connection point
     const sp3=convSpouts(cv);
     const spoutMat=new THREE.MeshLambertMaterial({color:new THREE.Color(clr3).multiplyScalar(0.7).getHex()});
-    [sp3.boot,sp3.head].forEach(sp=>{
-      if(!sp) return;
-      const p=toXZ(sp.lat,sp.lng), r=Math.max(0.35,cvW*0.4);
-      // Run the chute a little way into the outlet above and the conveyance below,
-      // so it reads as bolted to both rather than floating in the gap between them.
-      const OVER=0.35;
-      const topY=sp.topHt+OVER, botY=sp.botHt-OVER, h=Math.max(0.25,topY-botY);
-      const rTop=Math.max(r,+sp.topR||0);
+    // Run the chute a little way into the outlet above and the conveyance below,
+    // so it reads as bolted to both rather than floating in the gap between them.
+    const addChute3=(lat,lng,topHt,botHt,topRWanted)=>{
+      const p=toXZ(lat,lng), r=Math.max(0.35,cvW*0.4), OVER=0.35;
+      const topY=topHt+OVER, botY=botHt-OVER, h=Math.max(0.25,topY-botY);
+      const rTop=Math.max(r,+topRWanted||0);
       const chute=new THREE.Mesh(new THREE.CylinderGeometry(rTop,r,h,12),spoutMat);
       chute.position.set(p.x,botY+h/2,p.z); chute.castShadow=true; add3(chute);
-      // Flange where it hangs off the outlet, collar where it enters the conveyance
       const fl=new THREE.Mesh(new THREE.CylinderGeometry(rTop*1.25,rTop*1.25,0.28,12),spoutMat);
       fl.position.set(p.x,topY-0.14,p.z); add3(fl);
       const col=new THREE.Mesh(new THREE.CylinderGeometry(r*1.35,r*1.35,0.26,12),spoutMat);
       col.position.set(p.x,botY+0.13,p.z); add3(col);
+    };
+    [sp3.boot,sp3.head].forEach(sp=>{ if(sp) addChute3(sp.lat,sp.lng,sp.topHt,sp.botHt,sp.topR); });
+    // Extra sources drop into the run where it passes under them, so one conveyor
+    // can collect a whole row of bins on its way to the leg.
+    convInlineDrops(cv).forEach(d=>{
+      if(d.tooFar||d.cantFlow) return;              // flagged in Site Check instead
+      addChute3(d.lat,d.lng,d.dischargeHt,d.runHt,d.topR);
     });
     const midIdx=Math.floor(nodes.length/2);
     const mp=toXZ(nodes[midIdx].lat,nodes[midIdx].lng);
@@ -7359,7 +7512,8 @@ function helpHTML() {
     <li><b>Into a bin</b> → the top fill point, with the run sitting 2′ above it and a downspout dropping the grain in.</li>
     <li><b>Into a dryer</b> → the top of the dryer at its load end.</li>
     <li><b>Into a leg</b> → the boot, 6′ up. Never the head.</li>
-    <li><b>Out of a bin</b> → its unloader, with the receiving run passing underneath the outlet.</li>
+    <li><b>Out of a bin</b> → its unloader, with the receiving run passing underneath the outlet and a transition chute bridging the two.</li>
+    <li><b>Out of several bins at once</b> → check them all under <i>Receives From</i>. The first anchors the boot; the rest drop into the run where it passes under them, which is how you run one conveyor down a row of bins to a leg. Site Check flags any bin the run misses or sits too high for.</li>
     <li><b>Out of a dryer</b> → the discharge at the unload end, at grade.</li>
     <li><b>Out of a pit</b> → the conveyor discharge at the tail end.</li>
     <li><b>Out of another conveyance</b> → its head, with the next machine's boot stacked beneath it.</li>

@@ -1,7 +1,7 @@
 // Grain Site Designer — offline app shell.
 // Only same-origin GETs are cached. Supabase auth/API traffic is cross-origin
 // and is deliberately never touched, so sign-in and project data are always live.
-const CACHE = 'grain-site-designer-v7';
+const CACHE = 'grain-site-designer-v8';
 const FILES = [
   './',
   './index.html',
