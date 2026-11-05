@@ -361,6 +361,7 @@ const S = {
   power:{utilAmps:800, utilVolts:240, utilPhase:1, activeMode:'all'},
   opModes:[{id:'m1',name:'Receiving / Fill'},{id:'m2',name:'Drying'},{id:'m3',name:'Load-Out'}],
   opAssign:{},
+  srcAssign:{},   // per-motor power source, overriding its equipment's setting
   selId:null, selType:null,
   tool:'select', grainType:'corn', uid:1,
   projectId:null, projectName:'',
@@ -387,24 +388,62 @@ function powerSrcOpts(cur, allowPto) {
     + (S.generators||[]).map(g=>`<option value="${g.id}"${cur===g.id?' selected':''}>⚡ ${escH(g.name)}</option>`).join('')
     + (allowPto?`<option value="pto"${cur==='pto'?' selected':''}>🚜 Tractor PTO — no electrical load</option>`:'');
 }
+// What actually feeds one motor. The equipment's own Power Source is the default;
+// a per-motor choice made in the Power Estimate overrides it, so a bin's fan can
+// sit on a generator while its unload stays on the utility.
+function effLoadSrc(key, obj) {
+  const ov = (S.srcAssign||{})[key];
+  if (ov != null && ov !== '') return ov;
+  return (obj && obj.powerSrc) || 'utility';
+}
+function hasSrcOverride(key) {
+  const ov = (S.srcAssign||{})[key];
+  return ov != null && ov !== '';
+}
+// Drop every per-motor override belonging to one object — used when its own
+// Power Source is changed from the properties panel, so the panel always wins.
+function clearSrcOverridesFor(objId) {
+  if (!S.srcAssign) return false;
+  let hit = false;
+  Object.keys(S.srcAssign).forEach(k => { if (k.split('|')[0] === objId) { delete S.srcAssign[k]; hit = true; } });
+  return hit;
+}
+// Options for one motor's source: the equipment default, the utility, and each
+// generator. PTO only where a machine can actually be belted to a tractor.
+function loadSrcOpts(key, obj, allowPto) {
+  const cur = (S.srcAssign||{})[key] || '';
+  const def = (obj && obj.powerSrc) || 'utility';
+  const defName = def === 'pto' ? '🚜 PTO'
+    : def === 'utility' ? 'Utility'
+    : ((S.generators||[]).find(g=>g.id===def)||{}).name || 'Utility';
+  return `<option value=""${cur===''?' selected':''}>Default (${escH(defName)})</option>`
+    + `<option value="utility"${cur==='utility'?' selected':''}>Utility Service</option>`
+    + (S.generators||[]).map(g=>`<option value="${g.id}"${cur===g.id?' selected':''}>⚡ ${escH(g.name)}</option>`).join('')
+    + (allowPto?`<option value="pto"${cur==='pto'?' selected':''}>🚜 Tractor PTO</option>`:'');
+}
 // Gather every motor load on the site: {key, name, hp, src}
 // key is stable per motor so operating-mode assignments survive re-renders.
 function gatherElecLoads() {
   const loads=[];
+  const add=(key,name,hp,obj,ownerId,allowPto)=>{
+    if(!(hp>0)) return;
+    const src=effLoadSrc(key,obj);
+    // PTO machines turn no meter — they stay out of the electrical totals
+    if(src==='pto') return;
+    loads.push({key,name,hp,src,ownerId,allowPto:!!allowPto,objRef:obj});
+  };
   S.bins.forEach(b=>{
-    const src=b.powerSrc||'utility';
-    if(b.showFan&&(+b.fanHp||0)>0) loads.push({key:b.id+'|fanP',name:b.name+' — Fan 1',hp:+b.fanHp,src});
-    (b.fans||[]).forEach((f,i)=>{ if((+f.hp||0)>0) loads.push({key:`${b.id}|fan${i}`,name:`${b.name} — Fan ${i+2}`,hp:+f.hp,src}); });
-    if(b.showUnload&&(+b.unloadHp||0)>0) loads.push({key:b.id+'|unload',name:b.name+' — Unload',hp:+b.unloadHp,src});
+    if(b.showFan) add(b.id+'|fanP',b.name+' — Fan 1',+b.fanHp,b,b.id,false);
+    (b.fans||[]).forEach((f,i)=>add(`${b.id}|fan${i}`,`${b.name} — Fan ${i+2}`,+f.hp,b,b.id,false));
+    if(b.showUnload) add(b.id+'|unload',b.name+' — Unload',+b.unloadHp,b,b.id,false);
   });
-  S.legs.forEach(l=>{ if((+l.motorHp||0)>0) loads.push({key:l.id+'|motor',name:l.name+' — Motor',hp:+l.motorHp,src:l.powerSrc||'utility'}); });
-  S.conveyors.forEach(c=>{ if(c.powerSrc==='pto') return; const hp=convHp(c); if(hp>0) loads.push({key:c.id+'|motor',name:c.name+' — Motor'+(isHpAuto(c)?' (est.)':''),hp,src:c.powerSrc||'utility'}); });
+  S.legs.forEach(l=>add(l.id+'|motor',l.name+' — Motor',+l.motorHp,l,l.id,false));
+  S.conveyors.forEach(c=>add(c.id+'|motor',c.name+' — Motor'+(isHpAuto(c)?' (est.)':''),convHp(c),c,c.id,c.type==='auger'));
   S.dryers.forEach(d=>{
-    const src=d.powerSrc||'utility';
-    (d.dryerFans||[]).forEach((f,i)=>{ if((+f.hp||0)>0) loads.push({key:`${d.id}|fan${i}`,name:`${d.name} — Fan ${i+1}`,hp:+f.hp,src}); });
-    if((+d.motorHp||0)>0) loads.push({key:d.id+'|other',name:d.name+' — Augers/Other',hp:+d.motorHp,src});
+    (d.dryerFans||[]).forEach((f,i)=>add(`${d.id}|fan${i}`,`${d.name} — Fan ${i+1}`,+f.hp,d,d.id,false));
+    add(d.id+'|other',d.name+' — Augers/Other',+d.motorHp,d,d.id,false);
   });
-  S.portaugers.forEach(p=>{ if(p.powerSrc==='pto') return; const hp=paHp(p); if(hp>0) loads.push({key:p.id+'|motor',name:p.name+' — Motor'+(isHpAuto(p)?' (est.)':''),hp,src:p.powerSrc||'utility'}); });
+  S.portaugers.forEach(p=>add(p.id+'|motor',p.name+' — Motor'+(isHpAuto(p)?' (est.)':''),paHp(p),p,p.id,true));
   return loads;
 }
 // Does this motor run in the given operating mode? Unassigned motors default to ALL modes.
@@ -2597,7 +2636,8 @@ function bindPortAuger(pa) {
     pa.capBph=+document.getElementById('pabph')?.value||0;
     pa.hpAuto=document.getElementById('pahpauto')?.checked??isHpAuto(pa);
     pa.motorHp=pa.hpAuto?estimatePaHp(pa):(+document.getElementById('pahp')?.value||0);
-    pa.powerSrc=document.getElementById('pasrc')?.value||pa.powerSrc||'utility';
+    { const _prevSrc=pa.powerSrc; pa.powerSrc=document.getElementById('pasrc')?.value||pa.powerSrc||'utility';
+      if(_prevSrc!==pa.powerSrc) clearSrcOverridesFor(pa.id); }
     const prevMode=pa.paMode||'standalone';
     pa.paMode=document.getElementById('pamode')?.value||prevMode;
     pa.connBinId=pa.paMode==='standalone'?null:(document.getElementById('pabin')?.value||null);
@@ -2707,6 +2747,7 @@ function deleteGenerator(id){
   removeGeneratorLyr(id); S.generators=S.generators.filter(g=>g.id!==id);
   // Loads pointed at this generator fall back to utility
   [...S.bins,...S.legs,...S.conveyors,...S.dryers,...S.portaugers].forEach(o=>{ if(o.powerSrc===id) o.powerSrc='utility'; });
+  Object.keys(S.srcAssign||{}).forEach(k=>{ if(S.srcAssign[k]===id) delete S.srcAssign[k]; });
   if(S.selId===id)select(null,null); autoSave();
 }
 function generatorHTML(g) {
@@ -3382,7 +3423,8 @@ function bindBin(bin) {
     bin.fanType=document.getElementById('pftype')?.value||bin.fanType||'axial';
     document.querySelectorAll('.xfantype').forEach(el=>{ const i=+el.dataset.idx; if(bin.fans&&bin.fans[i]) bin.fans[i].type=el.value||'axial'; });
     bin.unloadHp=+document.getElementById('puhp')?.value||0;
-    bin.powerSrc=document.getElementById('bpsrc')?.value||bin.powerSrc||'utility';
+    { const _prevSrc=bin.powerSrc; bin.powerSrc=document.getElementById('bpsrc')?.value||bin.powerSrc||'utility';
+      if(_prevSrc!==bin.powerSrc) clearSrcOverridesFor(bin.id); }
     // Read extra fan bearings + HP
     document.querySelectorAll('.xfan').forEach(el=>{ const i=+el.dataset.idx; if(bin.fans&&bin.fans[i]) bin.fans[i].bearing=+el.value||0; });
     document.querySelectorAll('.xfanhp').forEach(el=>{ const i=+el.dataset.idx; if(bin.fans&&bin.fans[i]) bin.fans[i].hp=+el.value||0; });
@@ -3593,7 +3635,8 @@ function bindLeg(leg) {
     leg.caseDiamIn=+document.getElementById('plcasediam')?.value||leg.caseDiamIn||12;
     leg.capBph=+document.getElementById('plbph')?.value||0;
     leg.motorHp=+document.getElementById('plhp')?.value||0;
-    leg.powerSrc=document.getElementById('plsrc')?.value||leg.powerSrc||'utility';
+    { const _prevSrc=leg.powerSrc; leg.powerSrc=document.getElementById('plsrc')?.value||leg.powerSrc||'utility';
+      if(_prevSrc!==leg.powerSrc) clearSrcOverridesFor(leg.id); }
     leg.showSpout=document.getElementById('plss')?.checked??false;
     leg.spoutHt=+document.getElementById('plsh')?.value??leg.spoutHt;
     leg.spoutBearing=+document.getElementById('plsb')?.value||0;
@@ -3933,7 +3976,8 @@ function bindConv(cv) {
     }
     cv.hpAuto=document.getElementById('cvhpauto')?.checked??isHpAuto(cv);
     cv.motorHp=cv.hpAuto?estimateConvHp(cv):(+document.getElementById('cvhp')?.value||0);
-    cv.powerSrc=document.getElementById('cvsrc')?.value||cv.powerSrc||'utility';
+    { const _prevSrc=cv.powerSrc; cv.powerSrc=document.getElementById('cvsrc')?.value||cv.powerSrc||'utility';
+      if(_prevSrc!==cv.powerSrc) clearSrcOverridesFor(cv.id); }
     renderConveyor(cv); renderProperties(); autoSave();
   }
   ['cvn','cvbt','cvdiam','cvbox','cvtrcap','cvtrstyle','cvtrang','cvbph','cvhp','cvhpauto','cvsrc'].forEach(id=>document.getElementById(id)?.addEventListener('change',updBasic));
@@ -4217,7 +4261,8 @@ function bindDryer(dr) {
     dr.unloadEnd=document.getElementById('drunde')?.value||dr.unloadEnd||'head';
     dr.loadEnd=document.getElementById('drlde')?.value||dr.loadEnd||'tail';
     dr.motorHp=+document.getElementById('drhp')?.value||0;
-    dr.powerSrc=document.getElementById('drsrc')?.value||dr.powerSrc||'utility';
+    { const _prevSrc=dr.powerSrc; dr.powerSrc=document.getElementById('drsrc')?.value||dr.powerSrc||'utility';
+      if(_prevSrc!==dr.powerSrc) clearSrcOverridesFor(dr.id); }
     dr.foundHtFt=+document.getElementById('drfht')?.value||0;
     dr.foundExtFt=+document.getElementById('drfext')?.value||0;
     renderDryer(dr); renderProperties(); autoSave();
@@ -4371,7 +4416,7 @@ window.useAreaForRock = function(measId) {
 function serialise(includeProjects) {
   return JSON.stringify({
     bins:S.bins,legs:S.legs,conveyors:S.conveyors,pits:S.pits,dryers:S.dryers,trucks:S.trucks,
-    loadouts:S.loadouts,structures:S.structures,bends:S.bends,walkways:S.walkways,portaugers:S.portaugers,propanetanks:S.propanetanks,generators:S.generators,power:S.power,opModes:S.opModes,opAssign:S.opAssign,siteCheck:S.siteCheck||null,costOpts:S.costOpts||null,
+    loadouts:S.loadouts,structures:S.structures,bends:S.bends,walkways:S.walkways,portaugers:S.portaugers,propanetanks:S.propanetanks,generators:S.generators,power:S.power,opModes:S.opModes,opAssign:S.opAssign,srcAssign:S.srcAssign,siteCheck:S.siteCheck||null,costOpts:S.costOpts||null,
     savedAt:Date.now(),
     // Saved-project library rides along (data file / export only — never inside a
     // project payload itself, which would nest the library recursively)
@@ -4521,6 +4566,7 @@ function hydrateData(data) {
   if(!S.power.activeMode) S.power.activeMode='all';
   S.opModes=data.opModes||[{id:'m1',name:'Receiving / Fill'},{id:'m2',name:'Drying'},{id:'m3',name:'Load-Out'}];
   S.opAssign=data.opAssign||{};
+  S.srcAssign=data.srcAssign||{};
   // Restore any saved projects carried in the data file (newer copies win)
   if(Array.isArray(data.projLib)&&data.projLib.length){
     const idx=projIndex(); let changed=false;
@@ -7378,6 +7424,17 @@ window.delOpMode = function(id){
   if(S.power.activeMode===id) S.power.activeMode='all';
   autoSave(); showPowerReport();
 };
+// Point one motor at a different supply from the Power Estimate. An empty value
+// hands it back to whatever its equipment is set to.
+window.setLoadSrc = function(key, val){
+  if(!S.srcAssign) S.srcAssign={};
+  if(!val) delete S.srcAssign[key]; else S.srcAssign[key]=val;
+  autoSave(); showPowerReport();
+};
+window.clearAllSrcOverrides = function(){
+  S.srcAssign={}; autoSave(); showPowerReport();
+  showToast('✓ Every motor back to its equipment default');
+};
 window.toggleOpAssign = function(key,modeId){
   if(!S.opAssign) S.opAssign={};
   // Unassigned = runs in all modes; first uncheck materializes the full list minus this mode
@@ -7445,14 +7502,23 @@ function showPowerReport() {
     <button onclick="addOpMode()" style="padding:2px 8px;border-radius:4px;border:1px dashed #4b5563;background:none;color:#6b7280;cursor:pointer;font-size:0.8em">＋ Add Mode</button>
   </div>
   <p style="font-size:0.75em;color:#6b7280;margin:0 0 6px">The analysis below covers <b style="color:#e5e7eb">${escH(modeName)}</b> only. Check off which motors run in each mode — new motors run in every mode until you uncheck them.</p>`;
-  if(allLoads.length&&modes.length){
-    html+=`<details style="margin-bottom:10px"><summary style="cursor:pointer;font-size:0.8em;color:#9ca3af">Motor ↔ Mode assignments (${allLoads.length} motors)</summary>
-    <table class="rpt-table" style="margin-top:5px"><thead><tr><th>Motor</th><th>HP</th>${modes.map(m=>`<th style="text-align:center"><input value="${escH(m.name)}" onchange="renameOpMode('${m.id}',this.value)" style="width:82px;background:#111827;border:1px solid #374151;color:#e5e7eb;border-radius:3px;font-size:0.85em;padding:1px 4px;text-align:center"/><br><button onclick="delOpMode('${m.id}')" title="Delete mode" style="background:none;border:none;color:#6b7280;cursor:pointer;font-size:0.8em">✕</button></th>`).join('')}</tr></thead><tbody>`;
+  if(allLoads.length){
+    // One row per motor: what feeds it, and which modes it runs in. The source
+    // picker is here as well as on each piece of equipment, because sizing a
+    // service is when you actually decide what hangs off which supply.
+    const ovCount=allLoads.filter(ld=>hasSrcOverride(ld.key)).length;
+    html+=`<details style="margin-bottom:10px" open><summary style="cursor:pointer;font-size:0.8em;color:#9ca3af">Motors — power source${modes.length?' &amp; operating modes':''} (${allLoads.length} motor${allLoads.length===1?'':'s'}${ovCount?`, ${ovCount} reassigned`:''})</summary>
+    <p style="font-size:0.72em;color:#6b7280;margin:5px 0 4px">Each motor follows its equipment's Power Source until you change it here. Set one back to <b>Default</b> to hand it back, or change the equipment's own setting to reset every motor on it.${ovCount?` <button onclick="clearAllSrcOverrides()" style="background:none;border:1px solid #4b5563;color:#9ca3af;border-radius:3px;padding:1px 6px;cursor:pointer;font-size:0.95em;margin-left:4px">Reset all ${ovCount}</button>`:''}</p>
+    <table class="rpt-table" style="margin-top:3px"><thead><tr><th>Motor</th><th>HP</th><th>Powered From</th>${modes.map(m=>`<th style="text-align:center"><input value="${escH(m.name)}" onchange="renameOpMode('${m.id}',this.value)" style="width:82px;background:#111827;border:1px solid #374151;color:#e5e7eb;border-radius:3px;font-size:0.85em;padding:1px 4px;text-align:center"/><br><button onclick="delOpMode('${m.id}')" title="Delete mode" style="background:none;border:none;color:#6b7280;cursor:pointer;font-size:0.8em">✕</button></th>`).join('')}</tr></thead><tbody>`;
     allLoads.forEach(ld=>{
-      html+=`<tr><td>${escH(ld.name)}</td><td class="num">${ld.hp}</td>${modes.map(m=>`<td style="text-align:center"><input type="checkbox" ${loadRunsInMode(ld.key,m.id)?'checked':''} onchange="toggleOpAssign('${ld.key}','${m.id}')"/></td>`).join('')}</tr>`;
+      const ov=hasSrcOverride(ld.key);
+      html+=`<tr><td>${escH(ld.name)}</td><td class="num">${ld.hp}</td>`
+        + `<td><select onchange="setLoadSrc('${ld.key}',this.value)" style="width:100%;max-width:190px;padding:2px 5px;background:#111827;border:1px solid ${ov?'#f59e0b':'#374151'};color:${ov?'#fbbf24':'#e5e7eb'};border-radius:4px;font-size:0.95em">${loadSrcOpts(ld.key,ld.objRef,ld.allowPto)}</select></td>`
+        + `${modes.map(m=>`<td style="text-align:center"><input type="checkbox" ${loadRunsInMode(ld.key,m.id)?'checked':''} onchange="toggleOpAssign('${ld.key}','${m.id}')"/></td>`).join('')}</tr>`;
     });
     html+=`</tbody></table></details>`;
     // Per-mode quick comparison
+    if(modes.length){
     html+=`<table class="rpt-table" style="margin-bottom:10px"><thead><tr><th>Mode</th><th>Motors</th><th>Utility Amps</th><th>Generator kW</th></tr></thead><tbody>`;
     ['all',...modes.map(m=>m.id)].forEach(mid=>{
       const mls=allLoads.filter(ld=>loadRunsInMode(ld.key,mid));
@@ -7464,6 +7530,7 @@ function showPowerReport() {
       html+=`<tr${mid===mode?' style="background:rgba(245,158,11,0.07)"':''}><td>${mid==='all'?'All Motors':escH((modes.find(m=>m.id===mid)||{}).name||'?')}</td><td class="num">${mls.length}</td><td class="num" style="color:${uBad?'#ef4444':'#10b981'}">${uA.toFixed(0)} A / ${P.utilAmps}</td><td class="num">${gK.toFixed(1)} kW</td></tr>`;
     });
     html+=`</tbody></table>`;
+    }
   }
 
   // ─ Utility loads ─
@@ -7818,7 +7885,8 @@ function helpHTML() {
   <p style="font-size:0.8em;color:#d1d5db">Enter horsepower on each motor — bin fans and unloads, legs, conveyances, dryer fans. Conveyance HP is estimated for you. Then open <b>⚡ Power</b>:</p>
   <ul class="guide">
     <li>Set your incoming service — amps, voltage, single or three phase.</li>
-    <li>Each motor's <b>Power Source</b> is the utility, a generator you have placed, or 🚜 PTO (left out entirely).</li>
+    <li>Each piece of equipment has a <b>Power Source</b> — the utility, a generator you have placed, or 🚜 PTO (left out entirely).</li>
+    <li><b>Reassign individual motors</b> in the <i>Motors</i> table at the top of the Power Estimate: every motor on the site is listed with its own <i>Powered From</i> picker, so a bin's fan can sit on a generator while its unload stays on the utility. A reassigned motor shows in amber; set it back to <b>Default</b> to hand it to its equipment again, and changing the equipment's own Power Source resets every motor on it.</li>
     <li><b>Operating modes</b> let you say what actually runs together — receiving, drying, load-out. The analysis covers one mode at a time, so you size for reality instead of everything at once.</li>
     <li>kW is HP × 0.7457. <b>Motor starting inrush</b> is modelled at ~6× full load, shown worst case and with staged starting, and generators are checked against ~3× surge. The recommended generator size accounts for starting the largest motor while the rest run.</li>
   </ul>
