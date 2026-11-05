@@ -338,6 +338,8 @@ const UNLOADER_SPECS = {
   'conveyor': { label:'Drag conveyor',     widFt:16/12, htFt:12/12, isConveyor:true  }
 };
 function unloaderSpec(bin){ return UNLOADER_SPECS[String(bin.unloadSize||'10')] || UNLOADER_SPECS['10']; }
+// Height of a cone bin's extension-auger discharge above the pad
+const CONE_EXT_TIP_FT = 1.2;
 function unloaderPadHt(bin){ return +bin.foundFt||0; }        // top of the concrete
 function unloaderOutletHt(bin){ return unloaderPadHt(bin); }  // grain leaves at pad level
 // A conveyance taking grain from the unloader runs beneath that outlet.
@@ -1270,13 +1272,19 @@ function getUnloadPoint(id, type) {
   if (type === 'bin') {
     const b = S.bins.find(x=>x.id===id); if(!b) return null;
     if ((b.bottomType||'flat') === 'cone') {
-      // Cone-bottom: gate at center; an unloader extension carries it out past the wall
+      // Cone-bottom: the slide gate sits at the cone outlet, up on the hopper legs,
+      // and whatever takes the grain away runs underneath at pad level. The space
+      // between is the drop, bridged by a chute (see convSpouts).
+      const found=+b.foundFt||0, legH=+b.coneLegHt||3;
       const cext=Math.max(0,b.unloadExtFt!=null?+b.unloadExtFt:0);
       if(cext>0){
+        // An extension auger carries it out past the wall and discharges at the tip
         const cll=bearingOffset(L.latLng(b.lat,b.lng),(b.diam/2+cext)*FT2M,b.unloadAng||0);
-        return { lat:cll.lat, lng:cll.lng, htFt:b.foundFt||0 };
+        const tipHt=found+CONE_EXT_TIP_FT;
+        return { lat:cll.lat, lng:cll.lng, htFt:Math.max(0,tipHt-1), dischargeHt:tipHt, outletR:0.85 };
       }
-      return { lat:b.lat, lng:b.lng, htFt: b.foundFt||0 };
+      return { lat:b.lat, lng:b.lng, htFt:found,
+               dischargeHt:found+legH, outletR:1.05 };
     }
     const uext=Math.max(1,b.unloadExtFt!=null?+b.unloadExtFt:4);  // matches the drawn tip
     const ll = bearingOffset(L.latLng(b.lat,b.lng), (b.diam/2+uext)*FT2M, b.unloadAng||0);
@@ -5386,15 +5394,21 @@ function populate3D(){
         if(uext>0){
           const bR=bin.unloadAng*Math.PI/180, tipR=r+uext;
           const gY=Math.max(0.6,foundH+legH-0.9);
+          const tipY=foundH+CONE_EXT_TIP_FT;
           const uTube=new THREE.Mesh(new THREE.TubeGeometry(new THREE.LineCurve3(
             new THREE.Vector3(x,gY,z),
-            new THREE.Vector3(x+tipR*Math.sin(bR),0.8,z-tipR*Math.cos(bR))
+            new THREE.Vector3(x+tipR*Math.sin(bR),tipY+0.35,z-tipR*Math.cos(bR))
           ),1,0.5,10,false),uMat);
           uTube.castShadow=true;add3(uTube);
           const uHead=new THREE.Mesh(new THREE.BoxGeometry(1.5,1.5,1.5),uMat);
-          uHead.position.set(x+tipR*Math.sin(bR),1.2,z-tipR*Math.cos(bR));uHead.castShadow=true;add3(uHead);
+          uHead.position.set(x+tipR*Math.sin(bR),tipY+0.75,z-tipR*Math.cos(bR));uHead.castShadow=true;add3(uHead);
         } else {
-          const um=new THREE.Mesh(new THREE.SphereGeometry(1.5,8,8),uMat);um.position.set(x,foundH+1.5,z);add3(um);
+          // Slide gate at the cone outlet — where grain actually leaves the tank
+          const gy=foundH+legH;
+          const gate=new THREE.Mesh(new THREE.CylinderGeometry(1.15,0.8,1.0,12),uMat);
+          gate.position.set(x,gy+0.5,z);gate.castShadow=true;add3(gate);
+          const slide=new THREE.Mesh(new THREE.BoxGeometry(2.8,0.22,1.7),uMat);
+          slide.position.set(x,gy+0.12,z);slide.castShadow=true;add3(slide);
         }
       }
       // Staircase on cone-bottom (climbs from binFloorY up the sidewall)
