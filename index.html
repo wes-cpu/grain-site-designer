@@ -1272,11 +1272,16 @@ function getUnloadPoint(id, type) {
       }
       return { lat:b.lat, lng:b.lng, htFt: b.foundFt||0 };
     }
-    const uext=Math.max(0,b.unloadExtFt!=null?+b.unloadExtFt:4);
+    const uext=Math.max(1,b.unloadExtFt!=null?+b.unloadExtFt:4);  // matches the drawn tip
     const ll = bearingOffset(L.latLng(b.lat,b.lng), (b.diam/2+uext)*FT2M, b.unloadAng||0);
     // The unloader discharges at the top of the concrete, so whatever takes the
-    // grain away sits under that outlet.
-    return { lat:ll.lat, lng:ll.lng, htFt:underUnloaderHt(b) };
+    // grain away sits under that outlet. dischargeHt is where the grain actually
+    // leaves; htFt is where the receiving conveyance runs. The space between the
+    // two is bridged by a transition chute (see convSpouts).
+    const uspec=unloaderSpec(b);
+    return { lat:ll.lat, lng:ll.lng, htFt:underUnloaderHt(b),
+             dischargeHt:unloaderOutletHt(b),
+             outletR:Math.max(1.2,uspec.widFt*1.6)/2 };
   }
   if (type === 'leg') {
     const l = S.legs.find(x=>x.id===id); if(!l) return null;
@@ -1525,8 +1530,11 @@ function convSpouts(cv) {
   const { boot, head, nodes } = convEndTargets(cv);
   const out = { boot:null, head:null, problems:[] };
   if (boot) {
-    const nd = nodes[0], gap = boot.htFt - (+nd.htFt||0);
-    if (gap > SPOUT_MIN_FT) out.boot = { lat:nd.lat, lng:nd.lng, topHt:boot.htFt, botHt:+nd.htFt||0, dropFt:gap };
+    // Where grain leaves the source, which for a bin unloader sits above the
+    // conveyance taking it away — that difference is the chute.
+    const srcHt = (boot.dischargeHt!=null) ? boot.dischargeHt : boot.htFt;
+    const nd = nodes[0], gap = srcHt - (+nd.htFt||0);
+    if (gap > SPOUT_MIN_FT) out.boot = { lat:nd.lat, lng:nd.lng, topHt:srcHt, botHt:+nd.htFt||0, dropFt:gap, topR:boot.outletR||null };
     else if (gap < -SPOUT_MIN_FT) out.problems.push(`Boot sits ${(-gap).toFixed(1)}′ above the source discharge — grain can't climb into it.`);
   }
   if (head) {
@@ -5506,12 +5514,19 @@ function populate3D(){
     const spoutMat=new THREE.MeshLambertMaterial({color:new THREE.Color(clr3).multiplyScalar(0.7).getHex()});
     [sp3.boot,sp3.head].forEach(sp=>{
       if(!sp) return;
-      const p=toXZ(sp.lat,sp.lng), r=Math.max(0.35,cvW*0.4), h=sp.topHt-sp.botHt;
-      const tube=new THREE.Mesh(new THREE.CylinderGeometry(r,r,h,10),spoutMat);
-      tube.position.set(p.x,sp.botHt+h/2,p.z); tube.castShadow=true; add3(tube);
-      // Flared transition at the top where the spout hangs off the head / source
-      const flare=new THREE.Mesh(new THREE.CylinderGeometry(r*1.6,r,Math.min(2,h*0.4),10),spoutMat);
-      flare.position.set(p.x,sp.topHt-Math.min(2,h*0.4)/2,p.z); add3(flare);
+      const p=toXZ(sp.lat,sp.lng), r=Math.max(0.35,cvW*0.4);
+      // Run the chute a little way into the outlet above and the conveyance below,
+      // so it reads as bolted to both rather than floating in the gap between them.
+      const OVER=0.35;
+      const topY=sp.topHt+OVER, botY=sp.botHt-OVER, h=Math.max(0.25,topY-botY);
+      const rTop=Math.max(r,+sp.topR||0);
+      const chute=new THREE.Mesh(new THREE.CylinderGeometry(rTop,r,h,12),spoutMat);
+      chute.position.set(p.x,botY+h/2,p.z); chute.castShadow=true; add3(chute);
+      // Flange where it hangs off the outlet, collar where it enters the conveyance
+      const fl=new THREE.Mesh(new THREE.CylinderGeometry(rTop*1.25,rTop*1.25,0.28,12),spoutMat);
+      fl.position.set(p.x,topY-0.14,p.z); add3(fl);
+      const col=new THREE.Mesh(new THREE.CylinderGeometry(r*1.35,r*1.35,0.26,12),spoutMat);
+      col.position.set(p.x,botY+0.13,p.z); add3(col);
     });
     const midIdx=Math.floor(nodes.length/2);
     const mp=toXZ(nodes[midIdx].lat,nodes[midIdx].lng);
