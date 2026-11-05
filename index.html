@@ -2715,10 +2715,141 @@ function bindGenerator(g) {
 }
 
 // ── SUPPORT STRUCTURE ─────────────────────────────────────────
+// ── BUILDINGS ─────────────────────────────────────────────────
+// Real farm buildings, so a plan reads like the yard rather than a box.
+// Each preset is a starting point — every field stays editable afterwards.
+const BLDG_PRESETS = {
+  shed:    {label:'Machine Shed',       widFt:60, lenFt:100, postHt:16, roofStyle:'gable',   roofPitchIn12:4, wallColor:'#9aa5b1', roofColor:'#6b7280', trimColor:'#2f3843', ohDoors:2, ohDoorWFt:20, ohDoorHFt:16, doorWall:'end',  walkDoor:true,  windows:false, wainscotFt:3,   overhangFt:1,   openFront:false},
+  shop:    {label:'Shop',               widFt:40, lenFt:60,  postHt:16, roofStyle:'gable',   roofPitchIn12:4, wallColor:'#d7dbe0', roofColor:'#4b5563', trimColor:'#1f2937', ohDoors:1, ohDoorWFt:16, ohDoorHFt:14, doorWall:'end',  walkDoor:true,  windows:true,  wainscotFt:3,   overhangFt:1,   openFront:false},
+  office:  {label:'Grain Office',       widFt:24, lenFt:40,  postHt:10, roofStyle:'gable',   roofPitchIn12:6, wallColor:'#e5e7eb', roofColor:'#334155', trimColor:'#1f2937', ohDoors:0, ohDoorWFt:16, ohDoorHFt:14, doorWall:'end',  walkDoor:true,  windows:true,  wainscotFt:0,   overhangFt:1.5, openFront:false},
+  barn:    {label:'Barn',               widFt:36, lenFt:60,  postHt:12, roofStyle:'gambrel', roofPitchIn12:8, wallColor:'#9b2c2c', roofColor:'#52525b', trimColor:'#f3f4f6', ohDoors:1, ohDoorWFt:12, ohDoorHFt:12, doorWall:'end',  walkDoor:true,  windows:true,  wainscotFt:0,   overhangFt:1,   openFront:false},
+  house:   {label:'House',              widFt:32, lenFt:50,  postHt:10, roofStyle:'gable',   roofPitchIn12:8, wallColor:'#e8e3d9', roofColor:'#3f3f46', trimColor:'#1f2937', ohDoors:0, ohDoorWFt:16, ohDoorHFt:14, doorWall:'end',  walkDoor:true,  windows:true,  wainscotFt:0,   overhangFt:1.5, openFront:false},
+  leanto:  {label:'Lean-To / Open Front',widFt:24,lenFt:48,  postHt:14, roofStyle:'mono',    roofPitchIn12:3, wallColor:'#9aa5b1', roofColor:'#6b7280', trimColor:'#2f3843', ohDoors:0, ohDoorWFt:16, ohDoorHFt:14, doorWall:'end',  walkDoor:false, windows:false, wainscotFt:0,   overhangFt:1,   openFront:true},
+  quonset: {label:'Quonset',            widFt:40, lenFt:80,  postHt:3,  roofStyle:'arch',    roofPitchIn12:4, wallColor:'#b8bec6', roofColor:'#9aa5b1', trimColor:'#2f3843', ohDoors:1, ohDoorWFt:16, ohDoorHFt:14, doorWall:'end',  walkDoor:true,  windows:false, wainscotFt:0,   overhangFt:0.5, openFront:false},
+  bindrive:{label:'Drive-Through Shed', widFt:30, lenFt:70,  postHt:18, roofStyle:'gable',   roofPitchIn12:4, wallColor:'#9aa5b1', roofColor:'#6b7280', trimColor:'#2f3843', ohDoors:1, ohDoorWFt:20, ohDoorHFt:18, doorWall:'end',  walkDoor:false, windows:false, wainscotFt:0,   overhangFt:1,   openFront:true},
+};
+const BLDG_ROOFS = {gable:'Gable', gambrel:'Gambrel (barn)', mono:'Single Slope', arch:'Arch / Quonset', flat:'Low Slope'};
+// The roof line across the width, as [x, height above eave] from one wall to the other.
+// Every roof style is just a different profile, which keeps the walls, gable ends
+// and roof panels below completely generic.
+function roofProfile(st){
+  const hw=Math.max(1,(+st.widFt||24)/2), pitch=Math.max(0.5,+st.roofPitchIn12||4)/12;
+  switch(st.roofStyle||'gable'){
+    case 'flat': return [[-hw,0],[hw,Math.max(0.4,hw*0.08)]];
+    case 'mono': return [[-hw,0],[hw,pitch*hw*2]];
+    case 'arch': { const pts=[],N=16,h=hw*0.95;
+      for(let i=0;i<=N;i++){ const a=Math.PI*(1-i/N); pts.push([Math.cos(a)*hw,Math.max(0,Math.sin(a)*h)]); }
+      return pts; }
+    case 'gambrel': return [[-hw,0],[-hw*0.55,hw*0.62],[0,hw*0.95],[hw*0.55,hw*0.62],[hw,0]];
+    default: return [[-hw,0],[0,pitch*hw],[hw,0]];
+  }
+}
+function bldgPeakFt(st){
+  const eave=Math.max(0.5,+st.postHt||0);
+  return eave+roofProfile(st).reduce((m,p)=>Math.max(m,p[1]),0);
+}
+function bldgDoorCount(st){ return Math.max(0,Math.min(10,Math.round(+st.ohDoors||0))); }
+// Builds the whole building in its own local frame: origin at pad level,
+// +X across the width, +Z along the length, front end wall at -Z.
+function buildBuilding3(st){
+  const G=new THREE.Group();
+  const hw=Math.max(1,st.widFt/2), hl=Math.max(1,st.lenFt/2), eave=Math.max(0.5,st.postHt);
+  const wallC=new THREE.Color(st.wallColor||st.color||'#9aa5b1');
+  const wallM=new THREE.MeshLambertMaterial({color:wallC});
+  const roofM=new THREE.MeshLambertMaterial({color:new THREE.Color(st.roofColor||wallC.clone().multiplyScalar(0.55).getStyle())});
+  const trimM=new THREE.MeshLambertMaterial({color:new THREE.Color(st.trimColor||'#2f3843')});
+  const doorM=new THREE.MeshLambertMaterial({color:0x3a4249});
+  const glassM=new THREE.MeshLambertMaterial({color:0x93c5fd,transparent:true,opacity:0.6});
+  const prof=roofProfile(st), T=0.5;
+  const yAt=(xx)=>{ for(let i=0;i<prof.length-1;i++){ const[x1,y1]=prof[i],[x2,y2]=prof[i+1];
+      if(xx>=Math.min(x1,x2)-1e-6&&xx<=Math.max(x1,x2)+1e-6){ const t=(x2-x1)===0?0:(xx-x1)/(x2-x1); return y1+(y2-y1)*t; } }
+    return 0; };
+
+  // END WALLS — the rectangle plus the gable fill, taken straight from the profile
+  const shp=new THREE.Shape();
+  shp.moveTo(-hw,0); shp.lineTo(hw,0); shp.lineTo(hw,eave+yAt(hw));
+  for(let i=prof.length-1;i>=0;i--) shp.lineTo(prof[i][0],eave+prof[i][1]);
+  shp.lineTo(-hw,0);
+  const endGeo=new THREE.ExtrudeGeometry(shp,{depth:T,bevelEnabled:false});
+  [[-hl-T,true],[hl,false]].forEach(([zp,isFront])=>{
+    if(isFront&&st.openFront) return;              // drive-through / open-front shed
+    const m=new THREE.Mesh(endGeo,wallM); m.position.set(0,0,zp);
+    m.castShadow=m.receiveShadow=true; G.add(m);
+  });
+  // SIDE WALLS — height follows the profile at that edge, which matters on a single slope
+  [[-hw,-1],[hw,1]].forEach(([xp,s])=>{
+    const h=eave+yAt(xp);
+    const m=new THREE.Mesh(new THREE.BoxGeometry(T,h,st.lenFt),wallM);
+    m.position.set(xp+s*T/2,h/2,0); m.castShadow=m.receiveShadow=true; G.add(m);
+  });
+  // ROOF — one panel per profile segment, carried past the walls by the overhang
+  const ov=Math.max(0,st.overhangFt!=null?+st.overhangFt:1);
+  for(let i=0;i<prof.length-1;i++){
+    const[x1,y1]=prof[i],[x2,y2]=prof[i+1];
+    const dx=x2-x1, dy=y2-y1, len=Math.max(0.1,Math.hypot(dx,dy));
+    const ux=dx/len, uy=dy/len;
+    let cx=(x1+x2)/2, cy=(y1+y2)/2, L=len;
+    if(i===0){ L+=ov; cx-=ux*ov/2; cy-=uy*ov/2; }
+    if(i===prof.length-2){ L+=ov; cx+=ux*ov/2; cy+=uy*ov/2; }
+    const panel=new THREE.Mesh(new THREE.BoxGeometry(L,0.35,st.lenFt+ov*2),roofM);
+    panel.position.set(cx,eave+cy,0); panel.rotation.z=Math.atan2(dy,dx);
+    panel.castShadow=true; G.add(panel);
+  }
+  // WAINSCOT — the darker band farm buildings carry round the bottom
+  const wsc=Math.min(+st.wainscotFt||0,eave*0.8);
+  if(wsc>0){
+    [[0,-hl-T-0.08,st.widFt+T*2,0.16],[0,hl+T+0.08,st.widFt+T*2,0.16]].forEach(([px,pz,w,d])=>{
+      const m=new THREE.Mesh(new THREE.BoxGeometry(w,wsc,d),trimM); m.position.set(px,wsc/2,pz); G.add(m); });
+    [[-hw-T-0.08,0],[hw+T+0.08,0]].forEach(([px,pz])=>{
+      const m=new THREE.Mesh(new THREE.BoxGeometry(0.16,wsc,st.lenFt+T*2),trimM); m.position.set(px,wsc/2,pz); G.add(m); });
+  }
+  // OVERHEAD DOORS
+  const nd=bldgDoorCount(st);
+  if(nd>0){
+    const dh=Math.min(Math.max(6,+st.ohDoorHFt||14),eave-0.5);
+    const onEnd=(st.doorWall||'end')==='end';
+    const span=(onEnd?st.widFt:st.lenFt)-4, step=span/nd;
+    const dw=Math.min(Math.max(6,+st.ohDoorWFt||16),Math.max(4,step-2));
+    for(let i=0;i<nd;i++){
+      const c=-span/2+step*(i+0.5);
+      const door=onEnd
+        ? new THREE.Mesh(new THREE.BoxGeometry(dw,dh,0.35),doorM)
+        : new THREE.Mesh(new THREE.BoxGeometry(0.35,dh,dw),doorM);
+      if(onEnd) door.position.set(c,dh/2,-hl-T-0.25); else door.position.set(-hw-T-0.25,dh/2,c);
+      door.castShadow=true; G.add(door);
+      // Header above the opening, so it reads as a door rather than a painted panel
+      const hdr=onEnd
+        ? new THREE.Mesh(new THREE.BoxGeometry(dw+1,0.5,0.2),trimM)
+        : new THREE.Mesh(new THREE.BoxGeometry(0.2,0.5,dw+1),trimM);
+      if(onEnd) hdr.position.set(c,dh+0.25,-hl-T-0.3); else hdr.position.set(-hw-T-0.3,dh+0.25,c);
+      G.add(hdr);
+    }
+  }
+  // WALK DOOR, tucked on the front corner clear of the overhead doors
+  if(st.walkDoor!==false&&!st.openFront){
+    const wd=new THREE.Mesh(new THREE.BoxGeometry(3.5,Math.min(7,eave-0.5),0.3),trimM);
+    wd.position.set(hw-2.6,Math.min(7,eave-0.5)/2,-hl-T-0.22); G.add(wd);
+  }
+  // WINDOWS along both side walls
+  if(st.windows){
+    const cnt=Math.max(2,Math.round(st.lenFt/14));
+    for(let i=0;i<cnt;i++){
+      const cz=-hl+(st.lenFt/(cnt+1))*(i+1);
+      [-1,1].forEach(s=>{
+        const w=new THREE.Mesh(new THREE.BoxGeometry(0.3,3.2,4),glassM);
+        w.position.set(s*(hw+T*0.6),Math.max(2.2,eave*0.6),cz); G.add(w);
+      });
+    }
+  }
+  return G;
+}
 function addStructure(lat,lng) {
   const st={id:'struct_'+uid(),lat,lng,name:'Structure '+(S.structures.length+1),
     widFt:24,lenFt:24,bayFt:24,postHt:12,headDeg:0,color:'#94a3b8',phase:0,foundHtFt:0,foundExtFt:0,
-    structureType:'open',roofPitchIn12:4,scaleCapLbs:80000,cost:0,infraItems:[]};
+    structureType:'open',roofPitchIn12:4,scaleCapLbs:80000,cost:0,infraItems:[],
+    bldgKind:'shed',roofStyle:'gable',wallColor:'#9aa5b1',roofColor:'#6b7280',trimColor:'#2f3843',
+    ohDoors:2,ohDoorWFt:20,ohDoorHFt:16,doorWall:'end',walkDoor:true,windows:false,
+    wainscotFt:3,overhangFt:1,openFront:false};
   S.structures.push(st); renderStructure(st); select('structure',st.id); autoSave();
 }
 function renderStructure(st) {
@@ -2745,10 +2876,28 @@ function renderStructure(st) {
     map.on('mousemove',onMove); map.on('mouseup',onUp);
   });
 
+  // Buildings read differently in plan than open frames: show the ridge line and
+  // mark the wall the doors are on, so the orientation is obvious without the 3D.
+  if(st.structureType==='building'){
+    const prof=roofProfile(st);
+    const ridgeX=prof.reduce((b,p)=>p[1]>b[1]?p:b,prof[0])[0];
+    const rxM=(ridgeX/ (st.widFt/2)) * wM;
+    const ridge=L.polyline([rotPt(rxM,-lM),rotPt(rxM,lM)],
+      {color:st.roofColor||'#6b7280',weight:2,opacity:0.85,dashArray:'7,4',interactive:false}).addTo(map);
+    lines.push(ridge);
+    if(bldgDoorCount(st)>0||st.openFront){
+      const onEnd=(st.doorWall||'end')==='end'||st.openFront;
+      const a=onEnd?rotPt(-wM,-lM):rotPt(-wM,-lM);
+      const b=onEnd?rotPt(wM,-lM):rotPt(-wM,lM);
+      const dw=L.polyline([a,b],{color:'#f59e0b',weight:5,opacity:0.95,interactive:false}).addTo(map);
+      lines.push(dw);
+    }
+  }
   // Bay divisions + X-bracing along length axis
   const numBays=Math.max(1,Math.round(st.lenFt/Math.max(1,st.bayFt)));
   const bayM=(lM*2)/numBays;
-  for(let i=0;i<=numBays;i++) {
+  const showBays = st.structureType!=='building' && st.structureType!=='scale';
+  for(let i=0;showBays&&i<=numBays;i++) {
     const yOff=-lM+i*bayM;
     if(i>0&&i<numBays) {
       // Cross-member line
@@ -2785,7 +2934,7 @@ function structureHTML(st) {
   <div class="fr"><label>Type</label>
     <select id="sttype">
       <option value="open"${(st.structureType||'open')==='open'?' selected':''}>Open Steel Frame</option>
-      <option value="building"${st.structureType==='building'?' selected':''}>Building / Shop</option>
+      <option value="building"${st.structureType==='building'?' selected':''}>Building (shed, shop, barn, house)</option>
       <option value="scale"${st.structureType==='scale'?' selected':''}>Scale / Weigh Platform</option>
     </select>
   </div>
@@ -2795,7 +2944,38 @@ function structureHTML(st) {
   ${st.structureType!=='scale'?`<div class="fr"><label>Bay Spacing (ft)</label><input type="number" id="stb" value="${st.bayFt}" min="4" max="100" step="1"/></div>
   <p style="font-size:0.7em;color:#6b7280;margin-bottom:3px">Bay spacing sets how often cross-members and X-bracing repeat along the length.</p>`:''}
   ${st.structureType!=='scale'?`<div class="fr"><label>${st.structureType==='building'?'Eave Height (ft)':'Post / Column Ht (ft)'}</label><input type="number" id="stph" value="${st.postHt}" min="0" max="60" step="0.5"/></div>`:''}
-  ${st.structureType==='building'?`<div class="fr"><label>Roof Pitch (in/12)</label><input type="number" id="stroof" value="${st.roofPitchIn12||4}" min="1" max="12" step="1"/></div>`:''}
+  ${st.structureType==='building'?`
+  <div class="fr"><label>Building Type</label>
+    <select id="stkind" onchange="applyBldgPreset('${st.id}',this.value)">
+      ${Object.keys(BLDG_PRESETS).map(k=>`<option value="${k}"${(st.bldgKind||'')===k?' selected':''}>${BLDG_PRESETS[k].label}</option>`).join('')}
+      <option value="custom"${(st.bldgKind||'')==='custom'?' selected':''}>Custom</option>
+    </select>
+  </div>
+  <p style="font-size:0.7em;color:#6b7280;margin-bottom:3px">Picking a type fills in size, roof and doors to match. Everything below stays editable \u2014 change anything and the type switches to Custom.</p>
+  <div class="fr"><label>Roof Style</label>
+    <select id="stroofstyle">
+      ${Object.keys(BLDG_ROOFS).map(k=>`<option value="${k}"${(st.roofStyle||'gable')===k?' selected':''}>${BLDG_ROOFS[k]}</option>`).join('')}
+    </select>
+  </div>
+  ${['gable','mono'].includes(st.roofStyle||'gable')?`<div class="fr"><label>Roof Pitch (in/12)</label><input type="number" id="stroof" value="${st.roofPitchIn12||4}" min="1" max="16" step="1"/></div>`:''}
+  <div class="fr"><label>Roof Overhang (ft)</label><input type="number" id="stov" value="${st.overhangFt!=null?st.overhangFt:1}" min="0" max="6" step="0.5"/></div>
+  <div class="fr"><label>Wainscot Height (ft)</label><input type="number" id="stwsc" value="${st.wainscotFt||0}" min="0" max="12" step="0.5"/></div>
+  <div class="ph">Colors</div>
+  <div class="fr"><label>Walls</label><input type="color" id="stwc" value="${st.wallColor||st.color||'#9aa5b1'}"/></div>
+  <div class="fr"><label>Roof</label><input type="color" id="strc" value="${st.roofColor||'#6b7280'}"/></div>
+  <div class="fr"><label>Trim / Wainscot</label><input type="color" id="sttc" value="${st.trimColor||'#2f3843'}"/></div>
+  <div class="ph">Doors &amp; Windows</div>
+  <div class="fr"><label>Overhead Doors</label><input type="number" id="stndoor" value="${bldgDoorCount(st)}" min="0" max="10" step="1"/></div>
+  ${bldgDoorCount(st)>0?`<div class="fr"><label>Door Width (ft)</label><input type="number" id="stdw" value="${st.ohDoorWFt||16}" min="6" max="40" step="1"/></div>
+  <div class="fr"><label>Door Height (ft)</label><input type="number" id="stdh" value="${st.ohDoorHFt||14}" min="6" max="30" step="1"/></div>
+  <div class="fr"><label>Doors On</label><select id="stdwall">
+    <option value="end"${(st.doorWall||'end')==='end'?' selected':''}>End Wall (gable end)</option>
+    <option value="side"${st.doorWall==='side'?' selected':''}>Side Wall (eave side)</option>
+  </select></div>`:''}
+  <div class="fr"><label>Walk Door</label><input type="checkbox" id="stwd" ${st.walkDoor!==false?'checked':''}/></div>
+  <div class="fr"><label>Windows</label><input type="checkbox" id="stwin" ${st.windows?'checked':''}/></div>
+  <div class="fr"><label>Open Front</label><input type="checkbox" id="stof" ${st.openFront?'checked':''}/></div>
+  <p style="font-size:0.7em;color:#6b7280;margin-bottom:3px">Open Front leaves the front gable end off, for a lean-to or a drive-through shed.</p>`:''}
   ${st.structureType==='scale'?`<div class="fr"><label>Capacity (lbs)</label><input type="number" id="stscapacity" value="${st.scaleCapLbs||80000}" min="40000" max="200000" step="10000"/></div>
   <p style="font-size:0.7em;color:#6b7280;margin-bottom:3px">Standard truck scale: 11 ft wide × 70 ft long. Adjust width/length above to match your deck.</p>`:''}
   <div class="fr"><label>Heading (°)</label><input type="number" id="sthead" value="${st.headDeg}" min="0" max="359" step="5"/></div>
@@ -2811,6 +2991,9 @@ function structureHTML(st) {
     <div class="crow"><span class="lbl">Bay Length</span><span class="val">${(st.lenFt/numBays).toFixed(1)} ft</span></div>
     <div class="crow"><span class="lbl">Post Height</span><span class="val">${st.postHt} ft</span></div>
     <div class="crow"><span class="lbl">Footprint</span><span class="val">${Math.round(st.widFt*st.lenFt)} sq ft</span></div>
+    ${st.structureType==='building'?`<div class="crow"><span class="lbl">Peak Height</span><span class="val">${bldgPeakFt(st).toFixed(1)} ft</span></div>
+    <div class="crow"><span class="lbl">Roof</span><span class="val">${BLDG_ROOFS[st.roofStyle||'gable']}</span></div>
+    ${bldgDoorCount(st)>0?`<div class="crow"><span class="lbl">Overhead Doors</span><span class="val">${bldgDoorCount(st)} \u00d7 ${st.ohDoorWFt||16}\u2032 W \u00d7 ${st.ohDoorHFt||14}\u2032 H</span></div>`:''}`:''}
     ${st.phase?`<div class="crow"><span class="lbl">Build Phase</span><span class="val" style="color:${phaseColor(st.phase)}">${phaseName(st.phase)}</span></div>`:''}
   </div>
   <button class="pbtn warn" onclick="deleteStructure('${st.id}')">Delete Structure</button>`;
@@ -2828,10 +3011,40 @@ function bindStructure(st) {
     st.foundHtFt=+document.getElementById('stfht')?.value||0;
     st.foundExtFt=+document.getElementById('stfext')?.value||0;
     st.scaleCapLbs=+document.getElementById('stscapacity')?.value||st.scaleCapLbs||80000;
+    const g=(id)=>document.getElementById(id);
+    if(st.structureType==='building'){
+      if(g('stroofstyle')) st.roofStyle=g('stroofstyle').value;
+      if(g('stov')) st.overhangFt=Math.max(0,+g('stov').value||0);
+      if(g('stwsc')) st.wainscotFt=Math.max(0,+g('stwsc').value||0);
+      if(g('stwc')) st.wallColor=g('stwc').value;
+      if(g('strc')) st.roofColor=g('strc').value;
+      if(g('sttc')) st.trimColor=g('sttc').value;
+      if(g('stndoor')) st.ohDoors=Math.max(0,Math.min(10,Math.round(+g('stndoor').value||0)));
+      if(g('stdw')) st.ohDoorWFt=+g('stdw').value||st.ohDoorWFt;
+      if(g('stdh')) st.ohDoorHFt=+g('stdh').value||st.ohDoorHFt;
+      if(g('stdwall')) st.doorWall=g('stdwall').value;
+      if(g('stwd')) st.walkDoor=g('stwd').checked;
+      if(g('stwin')) st.windows=g('stwin').checked;
+      if(g('stof')) st.openFront=g('stof').checked;
+      st.color=st.wallColor||st.color;   // keep the 2D footprint in step with the walls
+      st.bldgKind='custom';              // hand edits mean it is no longer a stock preset
+    }
     renderStructure(st); renderProperties(); autoSave();
   }
-  ['stn','sttype','stw','stl','stb','stph','stroof','sthead','stfht','stfext','stscapacity'].forEach(id=>document.getElementById(id)?.addEventListener('change',upd));
+  ['stn','sttype','stw','stl','stb','stph','stroof','sthead','stfht','stfext','stscapacity',
+   'stroofstyle','stov','stwsc','stwc','strc','sttc','stndoor','stdw','stdh','stdwall','stwd','stwin','stof']
+    .forEach(id=>document.getElementById(id)?.addEventListener('change',upd));
 }
+
+window.applyBldgPreset = function(id,kind){
+  const st=S.structures.find(s=>s.id===id); if(!st) return;
+  if(kind==='custom'){ st.bldgKind='custom'; renderProperties(); autoSave(); return; }
+  const p=BLDG_PRESETS[kind]; if(!p) return;
+  Object.keys(p).forEach(k=>{ if(k!=='label') st[k]=p[k]; });
+  st.bldgKind=kind; st.color=st.wallColor;
+  renderStructure(st); renderProperties(); autoSave();
+  showToast(`✓ ${p.label}: ${p.widFt}′ × ${p.lenFt}′, ${p.postHt}′ eave`);
+};
 
 // ── MEASURE ──────────────────────────────────────────────────
 function addMeasurePt(ll) {
@@ -5932,34 +6145,12 @@ function populate3D(){
     const postMat=new THREE.MeshLambertMaterial({color:col});
     const braceMat=new THREE.MeshLambertMaterial({color:col,transparent:true,opacity:0.75});
     if(st.structureType==='building'){
-      // ── BUILDING: solid walls + gable roof ──
-      const wallMat=new THREE.MeshLambertMaterial({color:col,transparent:true,opacity:0.82});
-      const roofMat=new THREE.MeshLambertMaterial({color:col.clone().multiplyScalar(0.6)});
-      const ridgeH=(st.roofPitchIn12||4)/12*(st.widFt/2); // peak height above eave
-      const eaveY=ph;
-      // 4 walls: front/back along width, sides along length
-      const frontWall=new THREE.Mesh(new THREE.BoxGeometry(st.widFt,ph,0.5),wallMat);
-      frontWall.position.set(x,ph/2,z);frontWall.rotation.y=hRad;
-      frontWall.translateZ(-st.lenFt/2);frontWall.castShadow=frontWall.receiveShadow=true;add3(frontWall);
-      const backWall=new THREE.Mesh(new THREE.BoxGeometry(st.widFt,ph,0.5),wallMat);
-      backWall.position.set(x,ph/2,z);backWall.rotation.y=hRad;
-      backWall.translateZ(st.lenFt/2);backWall.castShadow=backWall.receiveShadow=true;add3(backWall);
-      const leftWall=new THREE.Mesh(new THREE.BoxGeometry(0.5,ph,st.lenFt),wallMat);
-      leftWall.position.set(x,ph/2,z);leftWall.rotation.y=hRad;
-      leftWall.translateX(-st.widFt/2);leftWall.castShadow=leftWall.receiveShadow=true;add3(leftWall);
-      const rightWall=new THREE.Mesh(new THREE.BoxGeometry(0.5,ph,st.lenFt),wallMat);
-      rightWall.position.set(x,ph/2,z);rightWall.rotation.y=hRad;
-      rightWall.translateX(st.widFt/2);rightWall.castShadow=rightWall.receiveShadow=true;add3(rightWall);
-      // Gable roof: two sloped panels
-      const roofW=Math.sqrt((st.widFt/2)**2+ridgeH**2); // slant length of each panel
-      const roofAng=Math.atan2(ridgeH,st.widFt/2);
-      const panelGeo=new THREE.BoxGeometry(roofW,0.4,st.lenFt+0.5);
-      const leftPanel=new THREE.Mesh(panelGeo,roofMat);
-      leftPanel.position.set(x,eaveY+ridgeH/2,z);leftPanel.rotation.y=hRad;
-      leftPanel.translateX(-st.widFt/4);leftPanel.rotateZ(roofAng);leftPanel.castShadow=true;add3(leftPanel);
-      const rightPanel=new THREE.Mesh(panelGeo,roofMat);
-      rightPanel.position.set(x,eaveY+ridgeH/2,z);rightPanel.rotation.y=hRad;
-      rightPanel.translateX(st.widFt/4);rightPanel.rotateZ(-roofAng);rightPanel.castShadow=true;add3(rightPanel);
+      // ── BUILDING: walls, gable ends, roof, doors — built in its own frame
+      // and set on the pad, so headings and pad heights need no special cases.
+      const grp=buildBuilding3(st);
+      grp.position.set(x,st.foundHtFt||0,z); grp.rotation.y=hRad;
+      grp.traverse(o=>{ if(o.isMesh) o.userData={siteId:st.id,siteType:'structure'}; });
+      add3(grp);
     } else if(st.structureType==='scale'){
       // ── SCALE / WEIGH PLATFORM ────────────────────────────────
       const deckH=1.0; // 1ft thick deck
@@ -6021,7 +6212,8 @@ function populate3D(){
       const pad=new THREE.Mesh(new THREE.BoxGeometry(pw,fh,pl),new THREE.MeshLambertMaterial({color:0x9ca3af}));
       pad.position.set(x,fh/2,z);pad.rotation.y=hRad;pad.receiveShadow=true;add3(pad);
     }
-    const peakY=st.structureType==='scale'?1.5:ph+(st.structureType==='building'?(st.roofPitchIn12||4)/12*(st.widFt/2):0);
+    const peakY=st.structureType==='scale'?1.5
+      :st.structureType==='building'?(st.foundHtFt||0)+bldgPeakFt(st):ph;
     const stIcon=st.structureType==='building'?'🏠':st.structureType==='scale'?'⚖':' ⬡';
     if(S.showLabels){const spr=makeLabel3(`${stIcon} ${st.name}\n${st.widFt}×${st.lenFt}′`,st.color);spr.position.set(x,peakY+10,z);add3(spr);}
   });
@@ -7452,6 +7644,7 @@ function helpHTML() {
     ['h-dryer','Dryers'],
     ['h-pit','Dump pits'],
     ['h-other','Everything else'],
+    ['h-bldg','Buildings'],
     ['h-phase','Build phases &amp; teardown'],
     ['h-cap','Capacity'],
     ['h-cost','Costs'],
@@ -7551,7 +7744,8 @@ function helpHTML() {
   ${S1('h-other','Everything else')}
   <div class="cbox" style="font-size:0.78em">
     <div class="crow"><span class="lbl">Overhead load-out</span><span class="val" style="color:#d1d5db">Drive-through bin on legs, open at both ends.</span></div>
-    <div class="crow"><span class="lbl">Structure / building</span><span class="val" style="color:#d1d5db">Open braced frame, closed building, or a truck scale.</span></div>
+    <div class="crow"><span class="lbl">Structure <kbd>S</kbd></span><span class="val" style="color:#d1d5db">Open braced frame, or a truck scale.</span></div>
+    <div class="crow"><span class="lbl">Building</span><span class="val" style="color:#d1d5db">Set a Structure's type to <i>Building</i> for the rest of the yard: machine shed, shop, grain office, barn, house, lean-to, quonset or drive-through shed. See below.</span></div>
     <div class="crow"><span class="lbl">Semi truck</span><span class="val" style="color:#d1d5db">Scale reference for checking turning room and clearances.</span></div>
     <div class="crow"><span class="lbl">Propane tank</span><span class="val" style="color:#d1d5db">Horizontal tank on saddles, with volume in gallons.</span></div>
     <div class="crow"><span class="lbl">Generator</span><span class="val" style="color:#d1d5db">kW, voltage and phase — feeds the power estimate.</span></div>
@@ -7559,6 +7753,16 @@ function helpHTML() {
     <div class="crow"><span class="lbl">Walkway <kbd>W</kbd></span><span class="val" style="color:#d1d5db">Catwalk between two bins at eave height — click one bin, then the other.</span></div>
     <div class="crow"><span class="lbl">Measure <kbd>M</kbd></span><span class="val" style="color:#d1d5db">Click points for distance and live area; feeds the rock calculator.</span></div>
   </div>
+
+  ${S1('h-bldg','Buildings')}
+  <p style="font-size:0.8em;color:#d1d5db">Place a <i>Structure</i> and set its Type to <b>Building</b> to put the rest of the yard on the plan — the shop, the machine shed, the office, the house. Pick a <b>Building Type</b> and the size, roof and doors fill in to match; change anything afterwards and it becomes Custom.</p>
+  <ul class="guide">
+    <li><b>Roof styles:</b> gable, gambrel for a barn, single slope for a lean-to, arch for a quonset, or low slope. Pitch is in rise per 12″ of run, and the gable ends fill in to match whatever style you pick.</li>
+    <li><b>Doors:</b> as many overhead doors as you need, each with its own width and height, on either the gable end or the eave side. Add a walk door and windows, or tick <i>Open Front</i> to leave the front end off for a lean-to or a drive-through.</li>
+    <li><b>Colors:</b> walls, roof and trim are set separately, and the wainscot band follows the trim colour.</li>
+    <li><b>In plan</b> the ridge shows as a dashed line and the door wall as a heavy orange edge, so you can see which way it faces without switching to 3D.</li>
+    <li>Buildings take a build phase, a teardown phase and costs like everything else, so an existing shop can stay through the phases while new bins go up around it.</li>
+  </ul>
 
   ${S1('h-phase','Build phases &amp; teardown')}
   <p style="font-size:0.8em;color:#d1d5db">Make as many phases as you need, name them and colour them. Every object has a <b>Build Phase</b> and a <b>Removed in Phase</b>.</p>
